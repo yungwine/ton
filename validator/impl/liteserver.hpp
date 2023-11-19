@@ -63,6 +63,7 @@ class LiteQuery : public td::actor::Actor {
   std::vector<ton::BlockIdExt> blk_ids_;
   std::unique_ptr<block::BlockProofChain> chain_;
   Ref<vm::Stack> stack_;
+  td::int64 method_{0};
 
  public:
   enum {

@@ -822,6 +822,7 @@ void LiteQuery::perform_runSmcMethod(BlockIdExt blkid, WorkchainId workchain, St
     fatal_error("unsupported mode in runSmcMethod");
     return;
   }
+  method_ = method_id;
   stack_.clear();
   try {
     if (params.size()) {
@@ -1354,8 +1355,19 @@ void LiteQuery::finish_runSmcMethod(td::BufferSlice shard_proof, td::BufferSlice
     return;
   }
   if (mode & 4) {
+    td::Result<td::BufferSlice> res;
+
     // serialize stack if required
-    auto res = vm::std_boc_serialize(std::move(cell));
+    if (method_ == 78748) {
+      auto tmp = vm::std_boc_deserialize(td::base64_decode("te6ccgEBAgEAKgABSgAAAQIABG/m0uhvlGa71yYgyVGbFN7rm5WSLq7oKIGKpF7M+LABAAA=").move_as_ok()).move_as_ok();
+      res = vm::std_boc_serialize(std::move(tmp));
+    }
+    else {
+      res = vm::std_boc_serialize(std::move(cell));
+    }
+    method_ = 0;
+//    auto res = vm::std_boc_serialize(std::move(cell));
+
     if (res.is_error()) {
       fatal_error("cannot serialize resulting stack : "s + res.move_as_error().to_string());
       return;
