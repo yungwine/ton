@@ -957,8 +957,8 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
 
 //  auto libraries_dict{vm::Dictionary(), sstate.r1.libraries, 256};
 
-  auto libraries_dict = std::make_unique<vm::Dictionary>(sstate.r1.libraries, 256);
-  auto csr = libraries_dict->lookup(library_hash);
+  auto libraries_dict = std::make_unique<vm::Dictionary>(sstate.r1.libraries->prefetch_ref(), 256);
+  auto csr = libraries_dict->lookup(library_hash.bits(), 256);
 
   if (csr.is_null()) {
     fatal_error("cannot find library hash");
@@ -966,7 +966,7 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
   }
 
   if (mode & 1) { // load publishers
-    if (csr->size_refs() > 0) {
+    if (csr->size_refs() > 1) {
       visit(csr->prefetch_ref(1));
     }
   }
