@@ -957,11 +957,18 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
 
 //  auto libraries_dict{vm::Dictionary(), sstate.r1.libraries, 256};
 
-  auto libraries_dict = std::make_unique<vm::Dictionary>(sstate.r1.libraries->prefetch_ref(), 256);
+  auto lib_root = sstate.r1.libraries->prefetch_ref();
+  auto libraries_dict = std::make_unique<vm::Dictionary>(std::move(lib_root), 256);
+
+  if (!libraries_dict) {
+    fatal_error("cannot unpack libraries dict for block "s + blk_id_.to_str());
+    return;
+  }
+
   auto csr = libraries_dict->lookup(library_hash.bits(), 256);
 
   if (csr.is_null()) {
-    fatal_error("cannot find library hash");
+    fatal_error("cannot find library hash "s + library_hash.to_hex() + "for block "s + blk_id_.to_str());
     return;
   }
 
