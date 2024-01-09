@@ -966,7 +966,9 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
   }
 
   if (mode & 1) { // load publishers
-    visit(csr->prefetch_ref());
+    if (csr->size_refs() > 0) {
+      visit(csr->prefetch_ref(1));
+    }
   }
 
   Ref<vm::Cell> proof;
