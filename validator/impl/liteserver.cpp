@@ -923,28 +923,8 @@ void LiteQuery::perform_getLibraryExt(int mode, BlockIdExt blkid, td::Bits256 li
 
   set_continuation([this, mode, library_hash]() -> void { continue_getLibraryExt(mode, library_hash); });
   request_mc_block_data_state(blkid);
-//  td::actor::send_closure_later(
-//      manager_, &ton::validator::ValidatorManager::get_last_liteserver_state_block,
-//      [Self = actor_id(this), mode, library_hash](td::Result<std::pair<Ref<ton::validator::MasterchainState>, BlockIdExt>> res) -> void {
-//        if (res.is_error()) {
-//          td::actor::send_closure(Self, &LiteQuery::abort_query, res.move_as_error());
-//        } else {
-//          auto pair = res.move_as_ok();
-//          td::actor::send_closure_later(Self, &LiteQuery::continue_getLibraryExt_0, mode, std::move(pair.first),
-//                                        pair.second, library_hash);
-//        }
-//      });
 }
 
-//void LiteQuery::continue_getLibraryExt_0(int mode, Ref<ton::validator::MasterchainState> mc_state, BlockIdExt blkid, td::Bits256 library_hash) {
-//  LOG(INFO) << "obtained last masterchain block = " << blkid.to_str();
-//  base_blk_id_ = blkid;
-//  CHECK(mc_state.not_null());
-//  mc_state_ = Ref<MasterchainStateQ>(std::move(mc_state));
-//  CHECK(mc_state_.not_null());
-//  set_continuation([&]() -> void { continue_getLibraryExt(mode, library_hash); });
-//  request_mc_block_data(blkid);
-//}
 
 void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
   vm::MerkleProofBuilder mpb{mc_state_->root_cell()};
@@ -978,9 +958,14 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
     }
   }
 
-  Ref<vm::Cell> proof;
+  Ref<vm::Cell> proof1, proof2;
 
-  if (!mpb.extract_proof_to(proof)) {
+  if (!make_mc_state_root_proof(proof1)) {
+    fatal_error("unknown error creating mc state proof");
+    return;
+  }
+
+  if (!mpb.extract_proof_to(proof2)) {
     fatal_error("unknown error creating Merkle proof");
     return;
   }
@@ -988,11 +973,21 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
   td::Result<td::BufferSlice> res_library, res_proof;
 
   res_library = vm::std_boc_serialize(csr->prefetch_ref());
-  res_proof = vm::std_boc_serialize(std::move(proof));
+  res_proof = vm::std_boc_serialize_multi({std::move(proof1), std::move(proof2)});
+
+  if (res_proof.is_error()) {
+    fatal_error(res_proof.move_as_error());
+    return;
+  }
+
+  if (res_library.is_error()) {
+    fatal_error(res_library.move_as_error());
+    return;
+  }
 
   auto a = ton::create_serialize_tl_object<ton::lite_api::liteServer_libraryExt>(
       mode,
-      ton::create_tl_lite_block_id(blk_id_),
+      ton::create_tl_lite_block_id(base_blk_id_),
       res_library.move_as_ok(),
       res_proof.move_as_ok()
       );

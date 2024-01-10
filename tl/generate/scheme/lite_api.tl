@@ -84,7 +84,7 @@ liteServer.getConfigAll mode:# id:tonNode.blockIdExt = liteServer.ConfigInfo;
 liteServer.getConfigParams mode:# id:tonNode.blockIdExt param_list:(vector int) = liteServer.ConfigInfo;
 liteServer.getValidatorStats#091a58bc mode:# id:tonNode.blockIdExt limit:int start_after:mode.0?int256 modified_after:mode.2?int = liteServer.ValidatorStats;
 liteServer.getLibraries library_list:(vector int256) = liteServer.LibraryResult;
-liteServer.getLibraryExt mode:# id:tonNode.blockIdExt library_hash:int256 = liteServer.LibraryExt; // mode==0 - returns only lib code, mode==1 - returns lib with publishers dict
+liteServer.getLibraryExt mode:# id:tonNode.blockIdExt library_hash:int256 = liteServer.LibraryExt;
 liteServer.getShardBlockProof id:tonNode.blockIdExt = liteServer.ShardBlockProof;
 
 liteServer.queryPrefix = Object; 
