@@ -921,7 +921,7 @@ void LiteQuery::perform_getLibraryExt(int mode, BlockIdExt blkid, td::Bits256 li
     return;
   }
 
-  set_continuation([&]() -> void { continue_getLibraryExt(mode, library_hash); });
+  set_continuation([this, mode, library_hash]() -> void { continue_getLibraryExt(mode, library_hash); });
   request_mc_block_data_state(blkid);
 //  td::actor::send_closure_later(
 //      manager_, &ton::validator::ValidatorManager::get_last_liteserver_state_block,
@@ -961,14 +961,14 @@ void LiteQuery::continue_getLibraryExt(int mode, td::Bits256 library_hash) {
   auto libraries_dict = std::make_unique<vm::Dictionary>(std::move(lib_root), 256);
 
   if (!libraries_dict) {
-    fatal_error("cannot unpack libraries dict for block "s + blk_id_.to_str());
+    fatal_error("cannot unpack libraries dict for block "s + base_blk_id_.to_str());
     return;
   }
 
   auto csr = libraries_dict->lookup(library_hash.bits(), 256);
 
   if (csr.is_null()) {
-    fatal_error("cannot find library hash "s + library_hash.to_hex() + "for block "s + blk_id_.to_str());
+    fatal_error("cannot find library hash "s + library_hash.to_hex() + "in block "s + base_blk_id_.to_str());
     return;
   }
 
