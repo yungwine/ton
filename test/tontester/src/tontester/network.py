@@ -263,9 +263,10 @@ class Network:
 
     def get_main_wallet(self):
         from contract import WalletV1
-        with open(self._directory / "state" / 'main-wallet.pk', 'rb') as f:
+
+        with open(self._directory / "state" / "main-wallet.pk", "rb") as f:
             pk = f.read()
-        with open(self._directory / "state" / 'main-wallet.addr', 'rb') as f:
+        with open(self._directory / "state" / "main-wallet.addr", "rb") as f:
             addr = f.read()[:32]
         w = WalletV1.from_private_key(pk, wc=-1)
         w.address.hash_part = addr
@@ -292,7 +293,7 @@ class Network:
         await asyncio.shield(self.aclose())
 
     async def get_tonlib_client(self) -> TonlibClient:
-        assert len(self.__full_nodes) > 0, 'No known full nodes in the network'
+        assert len(self.__full_nodes) > 0, "No known full nodes in the network"
         # return await random.choice(self.__full_nodes).tonlib_client()
         return await self.__full_nodes[0].tonlib_client()
 
@@ -335,14 +336,19 @@ class Network:
                 return await client.lookup_block(workchain=workchain, shard=shard, seqno=seqno)
             except TonlibError as e:
                 try:
-                    if e.result.code == 500 and ('LITE_SERVER_UNKNOWN:' in e.result.message or 'LITE_SERVER_NOTREADY:' in e.result.message):
+                    if e.result.code == 500 and (
+                        "LITE_SERVER_UNKNOWN:" in e.result.message
+                        or "LITE_SERVER_NOTREADY:" in e.result.message
+                    ):
                         await asyncio.sleep(0.2)
                         continue
                 except Exception:
                     pass
                 raise
 
-    async def wait_contract_balance_changed(self, address: SMCAddress, start_balance: int | None = None) -> int:
+    async def wait_contract_balance_changed(
+        self, address: SMCAddress, start_balance: int | None = None
+    ) -> int:
         client = await self.get_tonlib_client()
 
         if start_balance is None:

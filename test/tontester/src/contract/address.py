@@ -6,7 +6,6 @@ from pytoniq_core.boc.address import Address, Anycast  # pyright: ignore [report
 
 
 class SMCAddress(Address):
-
     def __init__(self, address: "str | tuple[int, bytes] | SMCAddress"):
         super().__init__(address)
         self.wc: int
@@ -28,11 +27,11 @@ class SMCAddress(Address):
             return
         if self._parse_b64(address):
             return
-        raise Exception('Unknown address type provided')
+        raise Exception("Unknown address type provided")
 
     def _parse_hex(self, addr: str) -> bool:
         try:
-            wc, hash_part = addr.split(':')
+            wc, hash_part = addr.split(":")
             _ = int(hash_part, 16)
             self.wc = int(wc)
             self.hash_part = bytes.fromhex(hash_part)
@@ -49,10 +48,10 @@ class SMCAddress(Address):
                 tag ^= 0x80
             if tag == 0x11:  # bounceable
                 self.is_bounceable = True
-            self.wc = int.from_bytes(decoded[1:2], 'big', signed=True)
+            self.wc = int.from_bytes(decoded[1:2], "big", signed=True)
             self.hash_part = decoded[2:34]
             if decoded[34:] != self._compute_crc16(decoded[:34]):
-                raise Exception('the address is invalid')
+                raise Exception("the address is invalid")
             return True
         except binascii.Error:
             return False
@@ -75,9 +74,15 @@ class SMCAddress(Address):
         return reg.to_bytes(2, "big")
 
     @override
-    def to_str(self, is_user_friendly: bool = True, is_url_safe: bool = True, is_bounceable: bool | None = None, is_test_only: bool | None = None) -> str:
+    def to_str(
+        self,
+        is_user_friendly: bool = True,
+        is_url_safe: bool = True,
+        is_bounceable: bool | None = None,
+        is_test_only: bool | None = None,
+    ) -> str:
         if not is_user_friendly:
-            return f'{self.wc}:{self.hash_part.hex()}'
+            return f"{self.wc}:{self.hash_part.hex()}"
         tag = 0x11  # bounceable tag
         is_bounceable = is_bounceable if is_bounceable is not None else self.is_bounceable
         is_test_only = is_test_only if is_test_only is not None else self.is_test_only
@@ -85,7 +90,7 @@ class SMCAddress(Address):
             tag = 0x51
         if is_test_only:
             tag |= 0x80
-        result = tag.to_bytes(1, 'big') + self.wc.to_bytes(1, 'big', signed=True) + self.hash_part
+        result = tag.to_bytes(1, "big") + self.wc.to_bytes(1, "big", signed=True) + self.hash_part
         result += self._compute_crc16(result)
         if is_url_safe:
             result = base64.urlsafe_b64encode(result).decode()
@@ -95,4 +100,4 @@ class SMCAddress(Address):
 
     @override
     def __repr__(self):
-        return f'SMCAddress<{self.to_str()}>'
+        return f"SMCAddress<{self.to_str()}>"

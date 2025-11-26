@@ -104,7 +104,14 @@ class TonlibClient:
         request = tonlib_api.Smc_getLibrariesRequest(library_list)
         return request.parse_result(await self._tonlib_wrapper.execute(request))
 
-    async def lookup_block(self, workchain: int, shard: int, seqno: int | None = None, lt: int | None = None, utime: int | None = None):
+    async def lookup_block(
+        self,
+        workchain: int,
+        shard: int,
+        seqno: int | None = None,
+        lt: int | None = None,
+        utime: int | None = None,
+    ):
         assert self._tonlib_wrapper is not None
         assert any((seqno, lt, utime)), "seqno, lt or unixtime must be provided"
         mode = 0
@@ -122,7 +129,7 @@ class TonlibClient:
                 seqno=seqno or 0,
             ),
             lt=lt or 0,
-            utime=utime or 0
+            utime=utime or 0,
         )
         return request.parse_result(await self._tonlib_wrapper.execute(request))
 
@@ -131,12 +138,16 @@ class TonlibClient:
     ) -> tonlib_api.Raw_transactions:
         assert self._tonlib_wrapper is not None
         request = tonlib_api.Raw_getTransactionsRequest(
-            account_address=tonlib_api.AccountAddress(account_address.to_str(is_user_friendly=True)),
+            account_address=tonlib_api.AccountAddress(
+                account_address.to_str(is_user_friendly=True)
+            ),
             from_transaction_id=from_transaction_id,
         )
         return request.parse_result(await self._tonlib_wrapper.execute(request))
 
-    async def raw_get_account_state(self, account_address: SMCAddress) -> tonlib_api.Raw_fullAccountState:
+    async def raw_get_account_state(
+        self, account_address: SMCAddress
+    ) -> tonlib_api.Raw_fullAccountState:
         assert self._tonlib_wrapper is not None
         request = tonlib_api.Raw_getAccountStateRequest(
             account_address=tonlib_api.AccountAddress(account_address.to_str(is_user_friendly=True))

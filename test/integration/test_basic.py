@@ -47,12 +47,12 @@ async def main():
             provider=client,
             seqno=0,
             message=WalletV1.create_wallet_internal_message(
-                destination=nw.address,
-                send_mode=3,
-                value=amount
-            )
+                destination=nw.address, send_mode=3, value=amount
+            ),
         )
-        _ = await network.wait_block(workchain=0, shard=-2**63, seqno=1)  # wait basechain to start
+        _ = await network.wait_block(
+            workchain=0, shard=-(2**63), seqno=1
+        )  # wait basechain to start
 
         nw_st = await network.wait_contract_balance_changed(address=nw.address, start_balance=-1)
         assert nw_st == amount
