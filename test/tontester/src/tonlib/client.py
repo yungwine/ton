@@ -4,6 +4,7 @@ import traceback
 from pathlib import Path
 
 from contract import SMCAddress
+from pytoniq_core import MessageAny
 from tontester.tl import ton_api, tonlib_api
 
 from .tonlibjson import TonLib
@@ -94,8 +95,9 @@ class TonlibClient:
         request = tonlib_api.Blocks_getMasterchainInfoRequest()
         return request.parse_result(await self._tonlib_wrapper.execute(request))
 
-    async def raw_send_message(self, serialized_boc: bytes) -> tonlib_api.TypeOk:
+    async def raw_send_message(self, message: MessageAny) -> tonlib_api.TypeOk:
         assert self._tonlib_wrapper is not None
+        serialized_boc = message.serialize().to_boc()
         request = tonlib_api.Raw_sendMessageRequest(body=serialized_boc)
         return request.parse_result(await self._tonlib_wrapper.execute(request))
 

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
-from typing import Self, ClassVar, Protocol
+from typing import Self, ClassVar
 
-from pytoniq_core import (  # pyright: ignore [reportMissingTypeStubs]
+from pytoniq_core import (
     Cell,
     ExternalMsgInfo,
     MessageAny,
@@ -9,13 +9,8 @@ from pytoniq_core import (  # pyright: ignore [reportMissingTypeStubs]
     InternalMsgInfo,
     StateInit,
 )
-from tontester.tl import tonlib_api
 
 from .address import SMCAddress
-
-
-class Provider(Protocol):
-    async def raw_send_message(self, serialized_boc: bytes) -> tonlib_api.TypeOk: ...
 
 
 @dataclass
@@ -72,7 +67,7 @@ class Contract:
         body: Cell | None = None,
     ) -> MessageAny:
         if isinstance(value, int):
-            value = CurrencyCollection(grams=value, other=None)  # pyright: ignore [reportArgumentType]
+            value = CurrencyCollection(grams=value)
         if bounce is None:
             bounce = dest.is_bounceable
         info = InternalMsgInfo(
@@ -92,15 +87,18 @@ class Contract:
         message = MessageAny(info=info, init=state_init, body=body)
         return message
 
-    async def send_external(
+    def get_external_message(
         self,
-        provider: Provider,
         src: SMCAddress | None = None,
         import_fee: int = 0,
         state_init: StateInit | None = None,
         body: Cell | None = None,
-    ):
+    ) -> MessageAny:
         message = self.create_external_msg(
             src=src, dest=self.address, import_fee=import_fee, state_init=state_init, body=body
         )
-        return await provider.raw_send_message(message.serialize().to_boc())
+        return message
+
+    def get_init_external(self) -> MessageAny:
+        assert self.state_init is not None, "contract does not have state_init"
+        return self.get_external_message(state_init=self.state_init)

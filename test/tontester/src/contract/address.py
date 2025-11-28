@@ -2,7 +2,7 @@ import base64
 import binascii
 from typing import override
 
-from pytoniq_core.boc.address import Address, Anycast  # pyright: ignore [reportMissingTypeStubs]
+from pytoniq_core.boc.address import Address, Anycast
 
 
 class SMCAddress(Address):

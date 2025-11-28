@@ -87,7 +87,7 @@ class Network:
             assert self._network._status < _Status.ZEROSTATE_GENERATED
 
         def _get_or_generate_zerostate(self):
-            return self._network._get_or_generate_zerostate()
+            return self._network.get_or_generate_zerostate()
 
         @property
         def _tonlib(self):
@@ -243,7 +243,7 @@ class Network:
         self.__full_nodes.append(node)
         return node
 
-    def _get_or_generate_zerostate(self) -> Zerostate:
+    def get_or_generate_zerostate(self) -> Zerostate:
         if self.__zerostate is not None:
             return self.__zerostate
 
@@ -260,17 +260,6 @@ class Network:
         )
         self._status = _Status.ZEROSTATE_GENERATED
         return self.__zerostate
-
-    def get_main_wallet(self):
-        from contract import WalletV1
-
-        with open(self._directory / "state" / "main-wallet.pk", "rb") as f:
-            pk = f.read()
-        with open(self._directory / "state" / "main-wallet.addr", "rb") as f:
-            addr = f.read()[:32]
-        w = WalletV1.from_private_key(pk, wc=-1)
-        w.address.hash_part = addr
-        return w
 
     async def aclose(self):
         assert self._status < _Status.CLOSED

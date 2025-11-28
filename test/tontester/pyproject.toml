@@ -3,5 +3,5 @@ name = "tontester"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "pytoniq_core"
+    "pytoniq_core>=0.1.46"
 ]

@@ -39,24 +39,25 @@ async def main():
 
         await network.wait_mc_block(seqno=1)
 
-        main_wallet = network.get_main_wallet()
+        main_wallet = network.get_or_generate_zerostate().main_wallet
         nw = WalletV1.create(wc=0)
         client = await network.get_tonlib_client()
         amount = 10**10
-        _ = await main_wallet.transfer(
-            provider=client,
+        msg = main_wallet.get_transfer_message(
             seqno=0,
             message=WalletV1.create_wallet_internal_message(
                 destination=nw.address, send_mode=3, value=amount
             ),
         )
+        _ = await client.raw_send_message(msg)
         _ = await network.wait_block(
             workchain=0, shard=-(2**63), seqno=1
         )  # wait basechain to start
 
         nw_st = await network.wait_contract_balance_changed(address=nw.address, start_balance=-1)
         assert nw_st == amount
-        _ = await nw.send_init_external(client)
+        msg = nw.get_init_external()
+        _ = await client.raw_send_message(msg)
         _ = await network.wait_contract_balance_changed(address=nw.address)
         st = await client.raw_get_account_state(nw.address)
         assert st.code and st.data  # contract should be deployed

@@ -4,6 +4,7 @@ from pathlib import Path
 from .install import Install, run_fift
 from .key import Key
 from .tl import ton_api
+from contract import WalletV1
 
 
 def _shard_json_repr(shard: int):
@@ -34,6 +35,7 @@ class WorkchainState:
 class Zerostate:
     masterchain: WorkchainState
     shardchain: WorkchainState
+    main_wallet: WalletV1
 
     def as_block(self):
         return ton_api.TonNode_blockIdExt(
@@ -98,7 +100,7 @@ config.workchains!
 }}>c
 // code
 <b 0 32 u,
-   "main-wallet.pk" load-generate-keypair drop
+   "{wallet_name}.pk" load-generate-keypair drop
    B,
 b> // data
 Libs{{
@@ -114,7 +116,7 @@ register_smc
 dup make_special dup constant smc1_addr
 Masterchain over
 2dup ."wallet address = " .addr cr 2dup 6 .Addr cr
-"main-wallet.addr" save-address-verbose
+"{wallet_name}.addr" save-address-verbose
 
 // SmartContract #3
 PROGRAM{{
@@ -298,6 +300,8 @@ def create_zerostate(
     for key in validator_keys:
         keys.append(f"B{{{key.public_key.key.hex()}}} 17 add-validator")
 
+    main_wallet_name = "main-wallet"
+
     run_fift(
         install,
         _TEMPLATE.format(
@@ -310,9 +314,17 @@ def create_zerostate(
             mc_validators=len(keys),
             mc_catchain_lifetime=config.mc_catchain_lifetime,
             shard_catchain_lifetime=config.shard_catchain_lifetime,
+            wallet_name=main_wallet_name,
         ),
         state_dir,
     )
+
+    with open(state_dir / f"{main_wallet_name}.pk", "rb") as f:
+        pk = f.read()
+    with open(state_dir / f"{main_wallet_name}.addr", "rb") as f:
+        addr = f.read()[:32]
+    main_wallet = WalletV1.from_private_key(pk, wc=-1)
+    main_wallet.address.hash_part = addr
 
     return Zerostate(
         masterchain=WorkchainState(
@@ -325,4 +337,5 @@ def create_zerostate(
             file_hash=(state_dir / "basestate0.fhash").read_bytes(),
             root_hash=(state_dir / "basestate0.rhash").read_bytes(),
         ),
+        main_wallet=main_wallet,
     )

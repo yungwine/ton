@@ -338,7 +338,7 @@ wheels = [
 
 [[package]]
 name = "pytoniq-core"
-version = "0.1.45"
+version = "0.1.46"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bitarray" },
@@ -348,9 +348,9 @@ dependencies = [
     { name = "setuptools" },
     { name = "x25519" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/17/45/4b398a0d6b7d6e892fe3a0a81a6e84aa721c14f7fdb514c737f249d37ce1/pytoniq_core-0.1.45.tar.gz", hash = "sha256:c5e19a838f0d6fa6b5fbe9cf4b575c242dc51090d078eaf3070af202e99c3738", size = 101155, upload-time = "2025-10-29T16:13:03.306Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/2c/7afbb9003a3aa72ccfe69711433fe36d2493db2c4acf66dde32f7b55799b/pytoniq_core-0.1.46.tar.gz", hash = "sha256:c8e3cf9ccb1852780a725cd51ba7a66a28122eb39c8b9bb97dcdc5bd02c24734", size = 101236, upload-time = "2025-11-28T10:23:21.887Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/5d/01f5ab4bb7103a5e493fedfb1788edcdbaf180186056de13b1c6ff08d443/pytoniq_core-0.1.45-py3-none-any.whl", hash = "sha256:f427f5c3b178a163015c24f18cf12dbb977738c131df17210e0da02895f9798a", size = 91263, upload-time = "2025-10-29T16:13:01.943Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/0e/e27cf7ce1bebb47fb95e1d6deae5c91c6ffcb7851f156990e57079cbe8db/pytoniq_core-0.1.46-py3-none-any.whl", hash = "sha256:0a284c8b68f9fed9d54e4dad871238d844339183bf985a614796360e36e1b95e", size = 91400, upload-time = "2025-11-28T10:23:20.95Z" },
 ]
 
 [[package]]
@@ -441,7 +441,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytoniq-core" }]
+requires-dist = [{ name = "pytoniq-core", specifier = ">=0.1.46" }]
 
 [[package]]
 name = "urllib3"
