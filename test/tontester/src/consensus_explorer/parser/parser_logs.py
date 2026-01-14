@@ -298,10 +298,10 @@ class ParserLogs(Parser):
     @staticmethod
     def _extract_timestamp(line: str) -> float | None:
         i = 0
-        for _ in range(4):
-            i = line.find('[', i) + 1
-        j = line.find(']', i)
-        timestamp_str = line[i:j]
+        for _ in range(3):
+            i = line.find(']', i) + 1
+        j = line.rfind('[', 0, i) + 1
+        timestamp_str = line[j:i - 1]
         dt = datetime.fromisoformat(timestamp_str)
         return dt.timestamp() * 1000
 
