@@ -168,6 +168,15 @@ class ParserLogs(Parser):
             block_id_match = re.search(r"(\([^)]+\):[A-F0-9]+:[A-F0-9]+)", line)
             assert block_id_match is not None
             block_id = block_id_match.group(0)
+            if slot_id not in self._slots:
+                self._slots[slot_id] = SlotData(
+                    valgroup_id=v_group,
+                    slot=slot,
+                    is_empty=False,
+                    slot_start_est_ms=t_ms,
+                    block_id_ext=None,
+                    collator=None,
+                )
             self._slots[slot_id].block_id_ext = block_id
 
     def _infer_slot_events(self) -> None:
