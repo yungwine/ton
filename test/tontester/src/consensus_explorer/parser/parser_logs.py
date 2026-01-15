@@ -377,7 +377,7 @@ class ParserLogs(Parser):
     @override
     def parse(self) -> ConsensusData:
         for log_file in self._logs_path:
-            with open(log_file, "r", encoding="utf-8") as f:
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
 
                 v_groups: dict[str, int] = {}
                 v_weights: dict[str, int] = {}
