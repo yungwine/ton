@@ -97,6 +97,46 @@ class ManagerFacadeImpl : public ManagerFacade {
   td::Ref<ValidatorManagerOptions> opts_;
 };
 
+class DbImpl : public Db {
+ public:
+  explicit DbImpl(std::string path) {
+    td::mkpath(path).ensure();
+    auto rocksdb = td::RocksDb::open(path).ensure().move_as_ok();
+    reader_ = rocksdb.snapshot();
+    writer_ = td::KeyValueAsync<td::BufferSlice, td::BufferSlice>(std::make_shared<td::RocksDb>(std::move(rocksdb)));
+  }
+
+  std::optional<td::BufferSlice> get(td::Slice key) const override {
+    std::string value;
+    auto result = reader_->get(key, value).ensure().move_as_ok();
+    if (result == td::KeyValueReader::GetStatus::Ok) {
+      return td::BufferSlice(value);
+    }
+    return std::nullopt;
+  }
+  std::vector<std::pair<td::BufferSlice, td::BufferSlice>> get_by_prefix(td::uint32 prefix) const override {
+    td::uint32 prefix2 = prefix + 1;
+    td::Slice begin{(const char*)&prefix, 4};
+    td::Slice end{(const char*)&prefix2, 4};
+    std::vector<std::pair<td::BufferSlice, td::BufferSlice>> result;
+    reader_
+        ->for_each_in_range(begin, end,
+                            [&](td::Slice key, td::Slice value) -> td::Status {
+                              result.emplace_back(key, value);
+                              return td::Status::OK();
+                            })
+        .ensure();
+    return result;
+  }
+  td::actor::Task<> set(td::BufferSlice key, td::BufferSlice value) override {
+    co_return co_await writer_.set(std::move(key), std::move(value));
+  }
+
+ private:
+  td::KeyValueAsync<td::BufferSlice, td::BufferSlice> writer_;
+  std::unique_ptr<td::KeyValueReader> reader_;
+};
+
 struct BridgeCreationParams {
   std::string name;
   bool is_create_session_called;
@@ -228,11 +268,7 @@ class BridgeImpl final : public IValidatorGroup {
 
     bus->populate_collator_schedule();
 
-    std::string db_dir = db_path() + "/db/";
-    td::mkpath(db_dir).ensure();
-    auto rocksdb = td::RocksDb::open(db_dir).ensure().move_as_ok();
-    bus->db_reader = rocksdb.snapshot();
-    bus->db = DbType(std::make_shared<td::RocksDb>(std::move(rocksdb)));
+    bus->db = std::make_unique<DbImpl>(db_path() + "/db/");
 
     auto [stop_waiter, stop_promise] = td::actor::StartedTask<>::make_bridge();
     stop_waiter_ = std::move(stop_waiter);
@@ -246,15 +282,20 @@ class BridgeImpl final : public IValidatorGroup {
     StatsCollector::register_in(runtime);
 
     if (is_simplex) {
+      auto simplex_bus = std::static_pointer_cast<simplex::Bus>(bus);
+      simplex_bus->load_bootstrap_state();
+
       simplex::CandidateResolver::register_in(runtime);
       simplex::Consensus::register_in(runtime);
       simplex::Pool::register_in(runtime);
 
-      bus_ = runtime.start(std::static_pointer_cast<simplex::Bus>(bus), params_.name);
+      bus_ = runtime.start(simplex_bus, params_.name);
     } else {
+      auto null_bus = std::static_pointer_cast<null::Bus>(bus);
+
       null::Consensus::register_in(runtime);
 
-      bus_ = runtime.start(std::static_pointer_cast<null::Bus>(bus), params_.name);
+      bus_ = runtime.start(null_bus, params_.name);
     }
 
     is_started_ = true;
