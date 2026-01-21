@@ -60,17 +60,31 @@ struct ResolveCandidate {
   std::string contents_to_string() const;
 };
 
+struct WaitCandidateInfoStored {
+  using ReturnType = td::Unit;
+
+  RawCandidateId id;
+  bool wait_candidate_info = false;
+  bool wait_notar_cert = false;
+
+  std::string contents_to_string() const;
+};
+
 class Bus : public consensus::Bus {
  public:
   using Parent = consensus::Bus;
   using Events = td::TypeList<BroadcastVote, NotarizationObserved, FinalizationObserved, LeaderWindowObserved,
-                              WaitForParent, ResolveCandidate>;
+                              WaitForParent, ResolveCandidate, WaitCandidateInfoStored>;
 
   Bus() = default;
 
   void populate_collator_schedule() override;
+  void load_bootstrap_state();
 
   NewConsensusConfig::Simplex simplex_config;
+
+  std::vector<Signed<Vote>> bootstrap_votes;
+  td::uint32 first_nonannounced_window = 0;
 
   // FIXME: These should come from validator options
   double max_backoff_delay_s = 100;

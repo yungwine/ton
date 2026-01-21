@@ -1166,6 +1166,13 @@ storage.daemon.removeStorageProvider = storage.daemon.Success;
 
 ---types---
 proxyLiteserver.config port:int id:PublicKey = proxyLiteserver.Config;
+---functions---
+
+---types---
+quic.message data:bytes = quic.Request;
+quic.query data:bytes = quic.Request;
+quic.answer data:bytes = quic.Response;
+
 engineConsoleClient.config address:string server_public_key:PublicKey client_private_key:PrivateKey = engineConsoleClient.Config;
 
 consensus.overlayId session_id:int256 nodes:(vector int256) = consensus.OverlayId;
@@ -1199,12 +1206,17 @@ consensus.simplex.candidateAndCert candidate:bytes notar:bytes = consensus.simpl
 
 consensus.simplex.db.key.vote vote_hash:int256 = consensus.simplex.db.key.Vote;
 consensus.simplex.db.vote data:bytes node_idx:int = consensus.simplex.db.Vote;
+
 consensus.simplex.db.key.poolState = consensus.simplex.db.key.PoolState;
 consensus.simplex.db.poolState first_nonannounced_window:int = consensus.simplex.db.PoolState;
-consensus.simplex.db.key.storedCandidate candidateId:consensus.candidateId = consensus.simplex.db.key.Candidate;
-consensus.simplex.db.storedCandidate leader_id:int candidate_hash_data:consensus.CandidateHashData
-    notar:consensus.simplex.voteSignatureSet signature:bytes = consensus.simplex.db.StoredCandidate;
+
 consensus.simplex.db.key.finalizedBlock candidateId:consensus.candidateId = consensus.simplex.db.key.FinalizedBlock;
+consensus.simplex.db.finalizedBlock block_id:tonNode.blockIdExt parent:consensus.CandidateParent is_final:Bool = consensus.simplex.db.FinalizedBlock;
+
+consensus.simplex.db.key.candidateResolver.candidateInfo candidateId:consensus.candidateId = consensus.simplex.db.key.candidateResolver.CandidateInfo;
+consensus.simplex.db.candidateResolver.candidateInfo leader_id:int candidate_hash_data:consensus.CandidateHashData signature:bytes = consensus.simplex.db.candidateResolver.CandidateInfo;
+consensus.simplex.db.key.candidateResolver.notarCert candidateId:consensus.candidateId = consensus.simplex.db.key.candidateResolver.NotarCert;
+consensus.simplex.db.candidateResolver.notarCert notar:consensus.simplex.voteSignatureSet = consensus.simplex.db.candidateResolver.NotarCert;
 
 ---functions---
 consensus.simplex.requestCandidate id:consensus.CandidateId want_candidate:Bool want_notar:Bool = consensus.simplex.CandidateAndCert;

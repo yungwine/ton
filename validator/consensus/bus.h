@@ -9,6 +9,7 @@
 #include "consensus/misbehavior.h"
 #include "keyring/keyring.hpp"
 #include "overlay/overlays.h"
+#include "quic/quic-sender.h"
 #include "rldp2/rldp.h"
 #include "td/db/KeyValueAsync.h"
 #include "ton/ton-types.h"
@@ -19,9 +20,28 @@
 
 namespace ton::validator::consensus {
 
+struct Start {
+  std::vector<BlockIdExt> first_block_parents;
+  BlockIdExt min_masterchain_block_id;
+
+  std::string contents_to_string() const;
+  std::vector<BlockIdExt> convert_id_to_blocks(ParentId parent) const;
+};
+
+using StartEvent = std::shared_ptr<const Start>;
+
 struct StopRequested {};
 
 struct BlockFinalized {
+  CandidateId candidate;
+  bool final_signatures;
+
+  std::string contents_to_string() const;
+};
+
+struct FinalizeBlock {
+  using ReturnType = td::Unit;
+
   RawCandidateRef candidate;
   ParentId parent_id;
   td::Ref<block::BlockSignatureSet> signatures;
@@ -76,6 +96,8 @@ struct ValidationRequest {
 };
 
 struct IncomingProtocolMessage {
+  using LogToDebug = std::true_type;
+
   PeerValidatorId source;
   ProtocolMessage message;
 
@@ -83,6 +105,8 @@ struct IncomingProtocolMessage {
 };
 
 struct OutgoingProtocolMessage {
+  using LogToDebug = std::true_type;
+
   std::optional<PeerValidatorId> recipient;
   ProtocolMessage message;
 
@@ -90,18 +114,26 @@ struct OutgoingProtocolMessage {
 };
 
 struct IncomingOverlayRequest {
+  using LogToDebug = std::true_type;
   using ReturnType = ProtocolMessage;
 
   PeerValidatorId source;
   ProtocolMessage request;
+
+  std::string contents_to_string() const;
+  static std::string response_to_string(const ReturnType&);
 };
 
 struct OutgoingOverlayRequest {
+  using LogToDebug = std::true_type;
   using ReturnType = ProtocolMessage;
 
   PeerValidatorId destination;
   td::Timestamp timeout;
   ProtocolMessage request;
+
+  std::string contents_to_string() const;
+  static std::string response_to_string(const ReturnType&);
 };
 
 struct BlockFinalizedInMasterchain {
@@ -113,6 +145,8 @@ struct BlockFinalizedInMasterchain {
 struct MisbehaviorReport {
   PeerValidatorId id;
   MisbehaviorRef proof;
+
+  std::string contents_to_string() const;
 };
 
 struct StatsTargetReached {
@@ -136,15 +170,24 @@ struct StatsTargetReached {
   std::string contents_to_string() const;
 };
 
-using DbType = td::KeyValueAsync<td::BufferSlice, td::BufferSlice>;
-using DbReaderType = std::unique_ptr<td::KeyValueReader>;
+class Db {
+ public:
+  virtual ~Db() = default;
+
+  // Note: `get` and `get_by_prefix` use db snapshot from the start
+  // `set` waits for syncing data to disk
+  virtual std::optional<td::BufferSlice> get(td::Slice key) const = 0;
+  virtual std::vector<std::pair<td::BufferSlice, td::BufferSlice>> get_by_prefix(td::uint32 prefix) const = 0;
+  virtual td::actor::Task<> set(td::BufferSlice key, td::BufferSlice value) = 0;
+};
 
 class Bus : public runtime::Bus {
  public:
-  using Events = td::TypeList<StopRequested, BlockFinalized, OurLeaderWindowStarted, OurLeaderWindowAborted,
-                              CandidateGenerated, CandidateReceived, ValidationRequest, IncomingProtocolMessage,
-                              OutgoingProtocolMessage, IncomingOverlayRequest, OutgoingOverlayRequest,
-                              BlockFinalizedInMasterchain, MisbehaviorReport, StatsTargetReached>;
+  using Events =
+      td::TypeList<Start, StopRequested, BlockFinalized, FinalizeBlock, OurLeaderWindowStarted, OurLeaderWindowAborted,
+                   CandidateGenerated, CandidateReceived, ValidationRequest, IncomingProtocolMessage,
+                   OutgoingProtocolMessage, IncomingOverlayRequest, OutgoingOverlayRequest, BlockFinalizedInMasterchain,
+                   MisbehaviorReport, StatsTargetReached>;
 
   Bus() = default;
   ~Bus() override {
@@ -152,8 +195,6 @@ class Bus : public runtime::Bus {
   }
 
   virtual void populate_collator_schedule() = 0;
-
-  std::vector<BlockIdExt> convert_id_to_blocks(ParentId parent) const;
 
   ValidatorSessionId session_id;
 
@@ -169,21 +210,15 @@ class Bus : public runtime::Bus {
   PeerValidator local_id;
 
   NewConsensusConfig config;
-  BlockIdExt min_masterchain_block_id;
 
   td::Ref<CollatorSchedule> collator_schedule;
 
   td::actor::ActorId<overlay::Overlays> overlays;
   td::actor::ActorId<rldp2::Rldp> rldp2;
-  DbType db;
-  DbReaderType db_reader;
-
-  std::vector<BlockIdExt> first_block_parents;
+  td::actor::ActorId<quic::QuicSender> quic;
+  std::unique_ptr<Db> db;
 
   td::Promise<td::Unit> stop_promise;
-
-  std::optional<td::BufferSlice> db_get(td::Slice key) const;
-  std::vector<std::pair<td::BufferSlice, td::BufferSlice>> db_get_by_prefix(td::uint32 prefix) const;
 };
 
 using BusHandle = runtime::BusHandle<Bus>;

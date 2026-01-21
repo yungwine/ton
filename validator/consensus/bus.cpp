@@ -29,13 +29,25 @@ std::string candidate_to_string(const td::OneOf<RawCandidateRef, CandidateRef> a
                    << ", block=" << std::visit(td::overloaded(block_fn, empty_fn), candidate->block) << "}";
 }
 
-std::string message_to_string(td::Slice message) {
-  auto maybe_decoded = fetch_tl_object<ton_api::Object>(message, true);
-  if (maybe_decoded.is_error()) {
-    return PSTRING() << "<message of size " << message.size() << ">";
+std::string message_to_string(const ProtocolMessage& message) {
+  constexpr size_t max_size_for_json = 1024;
+  constexpr size_t max_size_for_hex_dump = 256;
+
+  td::Slice data = message.data;
+
+  if (data.size() <= max_size_for_json) {
+    auto maybe_decoded = fetch_tl_object<ton_api::Object>(data, true);
+    if (maybe_decoded.is_ok()) {
+      return td::json_encode<std::string>(td::ToJson(maybe_decoded.ok()));
+    }
   }
 
-  return td::json_encode<std::string>(td::ToJson(maybe_decoded.ok()));
+  if (data.size() <= max_size_for_hex_dump) {
+    return PSTRING() << td::format::as_hex_dump<0>(data);
+  } else {
+    return PSTRING() << td::format::as_hex_dump<0>(data.substr(0, max_size_for_json)) << "... (truncated "
+                     << (data.size() - max_size_for_json) << " bytes)";
+  }
 }
 
 std::string block_signature_set_to_string(const td::Ref<block::BlockSignatureSet>& set) {
@@ -45,7 +57,29 @@ std::string block_signature_set_to_string(const td::Ref<block::BlockSignatureSet
 
 }  // namespace
 
+std::string Start::contents_to_string() const {
+  std::vector<std::string> blocks;
+  for (const auto& block : first_block_parents) {
+    blocks.push_back(block.to_str());
+  }
+
+  return PSTRING() << "{first_block_parents=" << blocks
+                   << ", min_masterchain_block_id=" << min_masterchain_block_id.to_str() << "}";
+}
+
+std::vector<BlockIdExt> Start::convert_id_to_blocks(ParentId parent) const {
+  if (parent.has_value()) {
+    return {parent->block};
+  } else {
+    return first_block_parents;
+  }
+}
+
 std::string BlockFinalized::contents_to_string() const {
+  return PSTRING() << "{candidate=" << candidate << ", final_sigs=" << final_signatures << "}";
+}
+
+std::string FinalizeBlock::contents_to_string() const {
   return PSTRING() << "{candidate=" << candidate_to_string(candidate)
                    << ", signatures=" << block_signature_set_to_string(signatures) << "}";
 }
@@ -72,16 +106,37 @@ std::string ValidationRequest::contents_to_string() const {
 }
 
 std::string IncomingProtocolMessage::contents_to_string() const {
-  return PSTRING() << "{source=" << source << ", message=" << message_to_string(message.data) << "}";
+  return PSTRING() << "{source=" << source << ", message=" << message_to_string(message) << "}";
 }
 
 std::string OutgoingProtocolMessage::contents_to_string() const {
   return PSTRING() << "{recipient=" << (recipient.has_value() ? (PSTRING() << *recipient) : "broadcast")
-                   << ", message=" << message_to_string(message.data) << "}";
+                   << ", message=" << message_to_string(message) << "}";
+}
+
+std::string IncomingOverlayRequest::contents_to_string() const {
+  return PSTRING() << "{source=" << source << ", request=" << message_to_string(request) << "}";
+}
+
+std::string IncomingOverlayRequest::response_to_string(const ReturnType& response) {
+  return PSTRING() << message_to_string(response);
+}
+
+std::string OutgoingOverlayRequest::contents_to_string() const {
+  return PSTRING() << "{destination=" << destination << ", timeout=" << timeout.in()
+                   << " remaining, request=" << message_to_string(request) << "}";
+}
+
+std::string OutgoingOverlayRequest::response_to_string(const ReturnType& response) {
+  return PSTRING() << message_to_string(response);
 }
 
 std::string BlockFinalizedInMasterchain::contents_to_string() const {
   return PSTRING() << "{block=" << block.to_str() << "}";
+}
+
+std::string MisbehaviorReport::contents_to_string() const {
+  return PSTRING() << "{id=" << id << "}";
 }
 
 std::string StatsTargetReached::contents_to_string() const {
@@ -95,38 +150,6 @@ std::string StatsTargetReached::contents_to_string() const {
       "FinalObserved",
   });
   return PSTRING() << "{target=" << targets[target] << ", slot=" << slot << ", timestamp=" << timestamp.at() << "}";
-}
-
-std::vector<BlockIdExt> Bus::convert_id_to_blocks(ParentId parent) const {
-  if (parent.has_value()) {
-    return {parent->block};
-  } else {
-    return first_block_parents;
-  }
-}
-
-std::optional<td::BufferSlice> Bus::db_get(td::Slice key) const {
-  std::string value;
-  auto result = db_reader->get(key, value).ensure().move_as_ok();
-  if (result == td::KeyValueReader::GetStatus::Ok) {
-    return td::BufferSlice(value);
-  }
-  return std::nullopt;
-}
-
-std::vector<std::pair<td::BufferSlice, td::BufferSlice>> Bus::db_get_by_prefix(td::uint32 prefix) const {
-  td::uint32 prefix2 = prefix + 1;
-  td::Slice begin{(const char*)&prefix, 4};
-  td::Slice end{(const char*)&prefix2, 4};
-  std::vector<std::pair<td::BufferSlice, td::BufferSlice>> result;
-  db_reader
-      ->for_each_in_range(begin, end,
-                          [&](td::Slice key, td::Slice value) -> td::Status {
-                            result.emplace_back(key, value);
-                            return td::Status::OK();
-                          })
-      .ensure();
-  return result;
 }
 
 }  // namespace ton::validator::consensus

@@ -5,6 +5,7 @@
  */
 
 #include "adnl/utils.hpp"
+#include "auto/tl/ton_api.h"
 #include "block/block.h"
 #include "block/validator-set.h"
 #include "consensus/runtime.h"
@@ -85,7 +86,16 @@ td::uint32 SLOTS_PER_LEADER_WINDOW = 4;
 std::pair<double, double> GREMLIN_PERIOD = {-1.0, -1.0};
 std::pair<double, double> GREMLIN_DOWNTIME = {1.0, 1.0};
 std::pair<size_t, size_t> GREMLIN_N = {1, 1};
+size_t GREMLIN_TIMES = 1000000000;
 bool GREMLIN_KILLS_LEADER = false;
+
+std::pair<double, double> NET_GREMLIN_PERIOD = {-1.0, -1.0};
+std::pair<double, double> NET_GREMLIN_DOWNTIME = {10.0, 10.0};
+std::pair<size_t, size_t> NET_GREMLIN_N = {1, 1};
+size_t NET_GREMLIN_TIMES = 1000000000;
+bool NET_GREMLIN_KILLS_LEADER = false;
+
+std::pair<double, double> DB_DELAY = {0.0, 0.0};
 
 class TestSimplexBus : public simplex::Bus {
  public:
@@ -98,31 +108,50 @@ class TestOverlayNode;
 class TestOverlay : public td::actor::Actor {
  public:
   void register_node(size_t idx, size_t instance_idx, td::actor::ActorId<TestOverlayNode> node) {
+    Instance &inst = get_inst(idx, instance_idx);
+    CHECK(inst.actor.empty());
+    inst.actor = std::move(node);
+  }
+
+  void unregister_node(size_t idx, size_t instance_idx) {
+    Instance &inst = get_inst(idx, instance_idx);
+    CHECK(!inst.actor.empty());
+    inst.actor = {};
+  }
+
+  td::actor::Task<> set_instance_disabled(size_t idx, size_t instance_idx, bool value) {
+    get_inst(idx, instance_idx).disabled = value;
+    LOG(ERROR) << "Node #" << idx << "." << instance_idx << ": " << (value ? "disable" : "enable") << " network";
+    co_return td::Unit{};
+  }
+
+  td::actor::Task<> send_message(PeerValidator src, size_t src_instance_idx, size_t dst_idx, td::BufferSlice message);
+  td::actor::Task<> send_candidate(PeerValidator src, size_t src_instance_idx, size_t dst_idx,
+                                   RawCandidateRef candidate);
+  td::actor::Task<td::BufferSlice> send_query(PeerValidator src, size_t src_instance_idx, size_t dst_idx,
+                                              td::BufferSlice message);
+
+ private:
+  struct Instance {
+    td::actor::ActorId<TestOverlayNode> actor;
+    bool disabled = false;
+  };
+  std::vector<std::vector<Instance>> nodes_;
+
+  Instance &get_inst(size_t idx, size_t instance_idx) {
     if (nodes_.size() <= idx) {
       nodes_.resize(idx + 1);
     }
     if (nodes_[idx].size() <= instance_idx) {
       nodes_[idx].resize(instance_idx + 1);
     }
-    CHECK(nodes_[idx][instance_idx].empty());
-    nodes_[idx][instance_idx] = std::move(node);
+    return nodes_[idx][instance_idx];
   }
 
-  void unregister_node(size_t idx, size_t instance_idx) {
-    CHECK(nodes_.size() > idx);
-    CHECK(nodes_[idx].size() > instance_idx);
-    CHECK(!nodes_[idx][instance_idx].empty());
-    nodes_[idx][instance_idx] = {};
-  }
-
-  td::actor::Task<> send_message(PeerValidator src, size_t dst_idx, td::BufferSlice message);
-  td::actor::Task<> send_candidate(PeerValidator src, size_t dst_idx, RawCandidateRef candidate);
-  td::actor::Task<td::BufferSlice> send_query(PeerValidator src, size_t dst_idx, td::BufferSlice message);
-
- private:
-  std::vector<std::vector<td::actor::ActorId<TestOverlayNode>>> nodes_;
-
-  td::actor::Task<> before_receive(size_t src_idx, size_t dst_idx, bool no_loss) {
+  td::actor::Task<> before_receive(size_t src_idx, size_t src_instance_idx, size_t dst_idx, bool no_loss) {
+    if (get_inst(src_idx, src_instance_idx).disabled) {
+      co_return td::Status::Error("src is disabled");
+    }
     if (!no_loss && td::Random::fast(0.0, 1.0) < NET_LOSS) {
       co_return td::Status::Error("packet lost");
     }
@@ -157,13 +186,14 @@ class TestOverlayNode : public runtime::SpawnsWith<Bus>, public runtime::Connect
   void handle(BusHandle bus, std::shared_ptr<const OutgoingProtocolMessage> message) {
     if (message->recipient.has_value()) {
       CHECK(message->recipient.value() != bus->local_id.idx);
-      td::actor::ask(test_overlay, &TestOverlay::send_message, bus->local_id, message->recipient->value(),
-                     message->message.data.clone())
+      td::actor::ask(test_overlay, &TestOverlay::send_message, bus->local_id, instance_idx_,
+                     message->recipient->value(), message->message.data.clone())
           .detach_silent();
     } else {
       for (size_t i = 0; i < bus->validator_set.size(); ++i) {
         if (bus->local_id.idx.value() != i) {
-          td::actor::ask(test_overlay, &TestOverlay::send_message, bus->local_id, i, message->message.data.clone())
+          td::actor::ask(test_overlay, &TestOverlay::send_message, bus->local_id, instance_idx_, i,
+                         message->message.data.clone())
               .detach_silent();
         }
       }
@@ -174,7 +204,8 @@ class TestOverlayNode : public runtime::SpawnsWith<Bus>, public runtime::Connect
   void handle(BusHandle bus, std::shared_ptr<const CandidateGenerated> event) {
     for (size_t i = 0; i < bus->validator_set.size(); ++i) {
       if (bus->local_id.idx.value() != i) {
-        td::actor::ask(test_overlay, &TestOverlay::send_candidate, bus->local_id, i, event->candidate).detach_silent();
+        td::actor::ask(test_overlay, &TestOverlay::send_candidate, bus->local_id, instance_idx_, i, event->candidate)
+            .detach_silent();
       }
     }
   }
@@ -201,7 +232,7 @@ class TestOverlayNode : public runtime::SpawnsWith<Bus>, public runtime::Connect
 
   td::actor::Task<> process_query_inner2(BusHandle bus, std::shared_ptr<OutgoingOverlayRequest> message,
                                          std::shared_ptr<td::Promise<ProtocolMessage>> promise_ptr) {
-    auto r_response = co_await td::actor::ask(test_overlay, &TestOverlay::send_query, bus->local_id,
+    auto r_response = co_await td::actor::ask(test_overlay, &TestOverlay::send_query, bus->local_id, instance_idx_,
                                               message->destination.value(), message->request.data.clone())
                           .wrap();
     if (r_response.is_ok() && *promise_ptr) {
@@ -236,39 +267,43 @@ class TestOverlayNode : public runtime::SpawnsWith<Bus>, public runtime::Connect
   size_t instance_idx_ = 0;
 };
 
-td::actor::Task<> TestOverlay::send_message(PeerValidator src, size_t dst_idx, td::BufferSlice message) {
-  co_await before_receive(src.idx.value(), dst_idx, false);
+td::actor::Task<> TestOverlay::send_message(PeerValidator src, size_t src_instance_idx, size_t dst_idx,
+                                            td::BufferSlice message) {
+  co_await before_receive(src.idx.value(), src_instance_idx, dst_idx, false);
   for (const auto &instance : nodes_[dst_idx]) {
-    if (instance.empty()) {
+    if (instance.actor.empty() || instance.disabled) {
       continue;
     }
-    td::actor::send_closure(instance, &TestOverlayNode::receive_message, src, message.clone());
+    td::actor::send_closure(instance.actor, &TestOverlayNode::receive_message, src, message.clone());
   }
   co_return td::Unit{};
 }
 
-td::actor::Task<> TestOverlay::send_candidate(PeerValidator src, size_t dst_idx, RawCandidateRef candidate) {
-  co_await before_receive(src.idx.value(), dst_idx, true);
+td::actor::Task<> TestOverlay::send_candidate(PeerValidator src, size_t src_instance_idx, size_t dst_idx,
+                                              RawCandidateRef candidate) {
+  co_await before_receive(src.idx.value(), src_instance_idx, dst_idx, true);
   for (const auto &instance : nodes_[dst_idx]) {
-    if (instance.empty()) {
+    if (instance.actor.empty() || instance.disabled) {
       continue;
     }
-    td::actor::send_closure(instance, &TestOverlayNode::receive_candidate, candidate);
+    td::actor::send_closure(instance.actor, &TestOverlayNode::receive_candidate, candidate);
   }
   co_return td::Unit{};
 }
 
-td::actor::Task<td::BufferSlice> TestOverlay::send_query(PeerValidator src, size_t dst_idx, td::BufferSlice message) {
+td::actor::Task<td::BufferSlice> TestOverlay::send_query(PeerValidator src, size_t src_instance_idx, size_t dst_idx,
+                                                         td::BufferSlice message) {
   if (nodes_[dst_idx].empty()) {
     co_return td::Status::Error("no instances");
   }
-  const auto &instance = nodes_[dst_idx][td::Random::fast(0, (int)nodes_[dst_idx].size() - 1)];
-  co_await before_receive(src.idx.value(), dst_idx, true);
-  if (instance.empty()) {
-    co_return td::Status::Error("instance is stopped");
+  auto dst_instance_idx = (size_t)td::Random::fast(0, (int)nodes_[dst_idx].size() - 1);
+  const auto &instance = nodes_[dst_idx][dst_instance_idx];
+  co_await before_receive(src.idx.value(), src_instance_idx, dst_idx, true);
+  if (instance.actor.empty() || instance.disabled) {
+    co_return td::Status::Error("instance is stopped/disabled");
   }
-  auto response = co_await td::actor::ask(instance, &TestOverlayNode::receive_query, src, std::move(message));
-  co_await before_receive(dst_idx, src.idx.value(), true);
+  auto response = co_await td::actor::ask(instance.actor, &TestOverlayNode::receive_query, src, std::move(message));
+  co_await before_receive(dst_idx, dst_instance_idx, src.idx.value(), true);
   co_return response;
 }
 
@@ -396,6 +431,59 @@ class TestManagerFacade : public ManagerFacade {
   td::actor::ActorId<CandidateStorage> candidate_storage_;
 };
 
+class TestDbImpl : public consensus::Db {
+ public:
+  struct DbInner {
+    std::map<td::BufferSlice, td::BufferSlice> map;
+    std::mutex mutex;
+  };
+
+  explicit TestDbImpl(std::shared_ptr<DbInner> db) : db_(std::move(db)) {
+    std::scoped_lock lock(db_->mutex);
+    for (auto &[key, value] : db_->map) {
+      snapshot_.emplace(key.clone(), value.clone());
+    }
+  }
+  ~TestDbImpl() override = default;
+
+  void disable() {
+    std::scoped_lock lock(db_->mutex);
+    disabled_ = true;
+  }
+
+  std::optional<td::BufferSlice> get(td::Slice key) const override {
+    auto it = snapshot_.find(td::BufferSlice{key});
+    if (it == snapshot_.end()) {
+      return std::nullopt;
+    }
+    return it->second.clone();
+  }
+  std::vector<std::pair<td::BufferSlice, td::BufferSlice>> get_by_prefix(td::uint32 prefix) const override {
+    std::vector<std::pair<td::BufferSlice, td::BufferSlice>> result;
+    td::BufferSlice begin{(const char *)&prefix, 4};
+    td::uint32 prefix2 = prefix + 1;
+    td::BufferSlice end{(const char *)&prefix2, 4};
+    for (auto it = snapshot_.lower_bound(begin); it != snapshot_.end() && it->first < end; ++it) {
+      result.emplace_back(it->first.clone(), it->second.clone());
+    }
+    return result;
+  }
+  td::actor::Task<> set(td::BufferSlice key, td::BufferSlice value) override {
+    co_await td::actor::coro_sleep(td::Timestamp::in(td::Random::fast(DB_DELAY.first, DB_DELAY.second)));
+    std::scoped_lock lock(db_->mutex);
+    if (disabled_) {
+      co_return td::Status::Error("db is disabled");
+    }
+    db_->map[std::move(key)] = std::move(value);
+    co_return {};
+  }
+
+ private:
+  std::map<td::BufferSlice, td::BufferSlice> snapshot_;
+  std::shared_ptr<DbInner> db_;
+  bool disabled_ = false;
+};
+
 class TestConsensus : public td::actor::Actor {
  public:
   td::actor::Task<> run() {
@@ -421,7 +509,12 @@ class TestConsensus : public td::actor::Actor {
       LOG_CHECK(accepted_blocks_[seqno]->block_id() == block_id) << "Accepted different blocks for seqno " << seqno;
     } else {
       accepted_blocks_[seqno] = block;
-
+    }
+    Instance &inst = nodes_[node_idx].instances[instance_idx];
+    inst.last_accepted_block = std::max(inst.last_accepted_block, seqno);
+    if (last_accepted_block_.seqno() < seqno && signatures->is_final()) {
+      last_accepted_block_ = block_id;
+      last_accepted_block_leader_idx_ = creator_idx;
       for (Node &node : nodes_) {
         for (Instance &inst : node.instances) {
           if (inst.status == Instance::Running) {
@@ -430,27 +523,32 @@ class TestConsensus : public td::actor::Actor {
         }
       }
     }
-    Instance &inst = nodes_[node_idx].instances[instance_idx];
-    inst.last_accepted_block = std::max(inst.last_accepted_block, seqno);
-    if (last_accepted_block_seqno_ < seqno) {
-      last_accepted_block_seqno_ = seqno;
-      last_accepted_block_leader_idx_ = creator_idx;
-    }
     co_return td::Unit{};
   }
 
-  td::actor::Task<td::Ref<vm::Cell>> wait_block_state_root(BlockIdExt block_id) {
+  td::actor::Task<> wait_block_accepted(BlockIdExt block_id) {
     if (block_id == FIRST_PARENT) {
-      co_return gen_shard_state(block_id.seqno());
+      co_return {};
     }
-    auto it = accepted_blocks_.find(block_id.seqno());
-    CHECK(it != accepted_blocks_.end());
-    CHECK(it->second->block_id() == block_id);
+    td::Timestamp timeout = td::Timestamp::in(10.0);
+    while (!timeout.is_in_past()) {
+      auto it = accepted_blocks_.find(block_id.seqno());
+      if (it != accepted_blocks_.end() && it->second->block_id() == block_id) {
+        co_return {};
+      }
+      co_await td::actor::coro_sleep(td::Timestamp::in(0.1));
+    }
+    co_return td::Status::Error(ErrorCode::timeout, "timeout");
+  }
+
+  td::actor::Task<td::Ref<vm::Cell>> wait_block_state_root(BlockIdExt block_id) {
+    co_await wait_block_accepted(block_id);
     co_return gen_shard_state(block_id.seqno());
   }
 
   td::actor::Task<td::Ref<BlockData>> wait_block_data(BlockIdExt block_id) {
     CHECK(block_id != FIRST_PARENT);
+    co_await wait_block_accepted(block_id);
     auto it = accepted_blocks_.find(block_id.seqno());
     CHECK(it != accepted_blocks_.end());
     CHECK(it->second->block_id() == block_id);
@@ -500,7 +598,7 @@ class TestConsensus : public td::actor::Actor {
       size_t n_instances = idx < N_DOUBLE_NODES ? 2 : 1;
       for (size_t i = 0; i < n_instances; ++i) {
         Instance inst;
-        inst.db = std::make_shared<td::MemoryKeyValue>();
+        inst.db_inner = std::make_shared<TestDbImpl::DbInner>();
         inst.candidate_storage =
             td::actor::create_actor<CandidateStorage>(PSTRING() << "ManagerFacade." << idx << "." << i);
         node.instances.push_back(std::move(inst));
@@ -508,13 +606,16 @@ class TestConsensus : public td::actor::Actor {
     }
 
     for (size_t idx = 0; idx < N_NODES; ++idx) {
-      for (size_t i = 0; i < nodes_[i].instances.size(); ++i) {
+      for (size_t i = 0; i < nodes_[idx].instances.size(); ++i) {
         start_instance(idx, i);
       }
     }
 
     if (GREMLIN_PERIOD.first >= 0.0) {
       run_gremlin().start().detach();
+    }
+    if (NET_GREMLIN_PERIOD.first >= 0.0) {
+      run_net_gremlin().start().detach();
     }
 
     co_await td::actor::coro_sleep(td::Timestamp::in(DURATION));
@@ -556,17 +657,17 @@ class TestConsensus : public td::actor::Actor {
         .max_collated_data_size = 1 << 20,
         .consensus = NewConsensusConfig::Simplex{.slots_per_leader_window = SLOTS_PER_LEADER_WINDOW}};
     bus->simplex_config = bus->config.consensus.get<NewConsensusConfig::Simplex>();
-    bus->min_masterchain_block_id = MIN_MC_BLOCK_ID;
     bus->session_id = SESSION_ID;
-    bus->first_block_parents = {FIRST_PARENT};
     bus->cc_seqno = CC_SEQNO;
     bus->validator_set_hash = validator_set_->get_validator_set_hash();
     bus->populate_collator_schedule();
-    bus->db_reader = inst.db->snapshot();
-    bus->db = DbType(inst.db);
+    bus->db = std::make_unique<TestDbImpl>(inst.db_inner);
+    bus->load_bootstrap_state();
     inst.bus = runtime.start(std::static_pointer_cast<simplex::Bus>(bus),
                              PSTRING() << "consensus." << node_idx << "." << instance_idx);
     inst.status = Instance::Running;
+    inst.bus.publish<BlockFinalizedInMasterchain>(last_accepted_block_);
+    inst.bus.publish<Start>(std::vector{FIRST_PARENT}, MIN_MC_BLOCK_ID);
     LOG(ERROR) << "Starting node #" << node_idx << "." << instance_idx;
   }
 
@@ -583,9 +684,12 @@ class TestConsensus : public td::actor::Actor {
     }
     LOG(ERROR) << "Stopping node #" << node_idx << "." << instance_idx;
     inst.bus.publish<StopRequested>();
+    dynamic_cast<TestDbImpl &>(*inst.bus->db).disable();
     inst.bus = {};
     inst.status = Instance::Stopping;
     co_await std::move(*inst.stop_waiter);
+    //std::move(inst.stop_waiter.value()).detach();
+    //co_await td::actor::coro_sleep(td::Timestamp::in(0.5));
     inst.status = Instance::Stopped;
     inst.runtime = {};
     LOG(ERROR) << "Stopped node #" << node_idx << "." << instance_idx;
@@ -597,7 +701,7 @@ class TestConsensus : public td::actor::Actor {
   }
 
   td::actor::Task<> run_gremlin() {
-    while (!finishing_) {
+    for (size_t i = 0; i < GREMLIN_TIMES && !finishing_; ++i) {
       co_await td::actor::coro_sleep(td::Timestamp::in(td::Random::fast(GREMLIN_PERIOD.first, GREMLIN_PERIOD.second)));
       int cnt = td::Random::fast((int)GREMLIN_N.first, (int)GREMLIN_N.second);
       for (int i = 0; i < cnt; ++i) {
@@ -641,6 +745,53 @@ class TestConsensus : public td::actor::Actor {
     co_return {};
   }
 
+  td::actor::Task<> run_net_gremlin() {
+    for (size_t i = 0; i < NET_GREMLIN_TIMES && !finishing_; ++i) {
+      co_await td::actor::coro_sleep(
+          td::Timestamp::in(td::Random::fast(NET_GREMLIN_PERIOD.first, NET_GREMLIN_PERIOD.second)));
+      int cnt = td::Random::fast((int)NET_GREMLIN_N.first, (int)NET_GREMLIN_N.second);
+      for (int i = 0; i < cnt; ++i) {
+        run_net_gremlin_once().start().detach();
+      }
+    }
+    co_return {};
+  }
+
+  td::actor::Task<> run_net_gremlin_once() {
+    if (finishing_) {
+      co_return {};
+    }
+    size_t selected_node_idx = 0, selected_inst_idx = 0;
+    int cnt = 0;
+    for (size_t node_idx = 0; node_idx < N_NODES; ++node_idx) {
+      if (NET_GREMLIN_KILLS_LEADER &&
+          (!last_accepted_block_leader_idx_ || last_accepted_block_leader_idx_.value() != node_idx)) {
+        continue;
+      }
+      for (size_t inst_idx = 0; inst_idx < nodes_[inst_idx].instances.size(); ++inst_idx) {
+        if (!nodes_[node_idx].instances[inst_idx].net_gremlin_active) {
+          ++cnt;
+          if (td::Random::fast(1, cnt) == 1) {
+            selected_node_idx = node_idx;
+            selected_inst_idx = inst_idx;
+          }
+        }
+      }
+    }
+    if (cnt == 0) {
+      co_return {};
+    }
+    nodes_[selected_node_idx].instances[selected_inst_idx].net_gremlin_active = true;
+    co_await td::actor::ask(test_overlay, &TestOverlay::set_instance_disabled, selected_node_idx, selected_inst_idx,
+                            true);
+    co_await td::actor::coro_sleep(
+        td::Timestamp::in(td::Random::fast(NET_GREMLIN_DOWNTIME.first, NET_GREMLIN_DOWNTIME.second)));
+    co_await td::actor::ask(test_overlay, &TestOverlay::set_instance_disabled, selected_node_idx, selected_inst_idx,
+                            false);
+    nodes_[selected_node_idx].instances[selected_inst_idx].net_gremlin_active = false;
+    co_return {};
+  }
+
   td::actor::Task<> finalize() {
     finishing_ = true;
     LOG(WARNING) << "TEST FINISHED";
@@ -668,13 +819,15 @@ class TestConsensus : public td::actor::Actor {
     simplex::BusHandle bus;
 
     BlockSeqno last_accepted_block = FIRST_PARENT.seqno();
-    std::shared_ptr<td::KeyValue> db;
+    std::shared_ptr<TestDbImpl::DbInner> db_inner;
     td::actor::ActorOwn<CandidateStorage> candidate_storage;
 
     enum Status { Stopped, Running, Stopping };
     Status status = Stopped;
     td::optional<td::actor::StartedTask<>> stop_waiter;
     std::vector<td::Promise<td::Unit>> extra_stop_waiters;
+
+    bool net_gremlin_active = false;
   };
   struct Node {
     PublicKey public_key;
@@ -692,7 +845,7 @@ class TestConsensus : public td::actor::Actor {
   td::actor::ActorOwn<keyring::Keyring> keyring_;
 
   std::map<BlockSeqno, td::Ref<BlockData>> accepted_blocks_;
-  BlockSeqno last_accepted_block_seqno_ = FIRST_PARENT.seqno();
+  BlockIdExt last_accepted_block_ = FIRST_PARENT;
   td::optional<size_t> last_accepted_block_leader_idx_;
   bool finishing_ = false;
 };
@@ -781,6 +934,7 @@ int main(int argc, char *argv[]) {
     }
     return td::Status::OK();
   });
+
   p.add_checked_option('\0', "gremlin-period", "gremlin period (range, default: no gremlin)", [&](td::Slice arg) {
     TRY_RESULT_ASSIGN(GREMLIN_PERIOD, parse_range(arg));
     if (GREMLIN_PERIOD.first < 0.0 || GREMLIN_PERIOD.second <= 0.0) {
@@ -800,8 +954,50 @@ int main(int argc, char *argv[]) {
                          TRY_RESULT_ASSIGN(GREMLIN_N, parse_int_range<size_t>(arg));
                          return td::Status::OK();
                        });
+  p.add_checked_option('\0', "gremlin-times", "how many times gremlin runs (default: unlimited)", [&](td::Slice arg) {
+    TRY_RESULT_ASSIGN(GREMLIN_TIMES, td::to_integer_safe<size_t>(arg));
+    return td::Status::OK();
+  });
   p.add_option('\0', "gremlin-kills-leader", "gremlin always restarts the current leader",
                [&]() { GREMLIN_KILLS_LEADER = true; });
+
+  p.add_checked_option('\0', "net-gremlin-period", "network gremlin period (range, default: no gremlin)",
+                       [&](td::Slice arg) {
+                         TRY_RESULT_ASSIGN(NET_GREMLIN_PERIOD, parse_range(arg));
+                         if (NET_GREMLIN_PERIOD.first < 0.0 || NET_GREMLIN_PERIOD.second <= 0.0) {
+                           return td::Status::Error(PSTRING() << "invalid net gremlin period value " << arg);
+                         }
+                         return td::Status::OK();
+                       });
+  p.add_checked_option('\0', "net-gremlin-downtime", "network gremlin downtime duration (range, default: 10)",
+                       [&](td::Slice arg) {
+                         TRY_RESULT_ASSIGN(NET_GREMLIN_DOWNTIME, parse_range(arg));
+                         if (NET_GREMLIN_DOWNTIME.first < 0.0) {
+                           return td::Status::Error(PSTRING() << "invalid network gremlin downtime value " << arg);
+                         }
+                         return td::Status::OK();
+                       });
+  p.add_checked_option('\0', "net-gremlin-n", "how many nodes network gremlin disables at once (range, default: 1)",
+                       [&](td::Slice arg) {
+                         TRY_RESULT_ASSIGN(NET_GREMLIN_N, parse_int_range<size_t>(arg));
+                         return td::Status::OK();
+                       });
+  p.add_checked_option('\0', "net-gremlin-times", "how many times network gremlin runs (default: unlimited)",
+                       [&](td::Slice arg) {
+                         TRY_RESULT_ASSIGN(NET_GREMLIN_TIMES, td::to_integer_safe<size_t>(arg));
+                         return td::Status::OK();
+                       });
+  p.add_option('\0', "net-gremlin-kills-leader", "network gremlin always disables the current leader",
+               [&]() { NET_GREMLIN_KILLS_LEADER = true; });
+  p.add_checked_option('\0', "db-delay", "delay before db values are stored to disk (range, default: 0)",
+                       [&](td::Slice arg) {
+                         TRY_RESULT_ASSIGN(DB_DELAY, parse_range(arg));
+                         if (DB_DELAY.first < 0.0) {
+                           return td::Status::Error(PSTRING() << "invalid db delay value " << arg);
+                         }
+                         return td::Status::OK();
+                       });
+
   p.run(argc, argv).ensure();
   CHECK(N_DOUBLE_NODES <= N_NODES);
 

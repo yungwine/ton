@@ -17,8 +17,8 @@ namespace {
 
 class CandidateParent {
  public:
-  CandidateParent(const Bus& bus, const ParentId& parent) {
-    parent_blocks_ = bus.convert_id_to_blocks(parent);
+  CandidateParent(const Start& genesis_, const ParentId& parent) {
+    parent_blocks_ = genesis_.convert_id_to_blocks(parent);
     seqno_ = parent_blocks_.size() == 1 ? parent_blocks_[0].seqno()
                                         : std::max(parent_blocks_[0].seqno(), parent_blocks_[1].seqno());
     parent_id_ = parent;
@@ -34,11 +34,11 @@ class CandidateParent {
     return parent_blocks_;
   }
 
-  int seqno() const {
+  BlockSeqno seqno() const {
     return seqno_;
   }
 
-  int next_seqno() const {
+  BlockSeqno next_seqno() const {
     return seqno_ + 1;
   }
 
@@ -48,7 +48,7 @@ class CandidateParent {
 
  private:
   std::vector<BlockIdExt> parent_blocks_;
-  int seqno_;
+  BlockSeqno seqno_;
   ParentId parent_id_;
 };
 
@@ -56,10 +56,19 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
  public:
   TON_RUNTIME_DEFINE_EVENT_HANDLER();
 
-  void start_up() {
-    auto& bus = *owning_bus();
+  void start_up() override {
+    auto [awaiter, promise] = td::actor::StartedTask<StartEvent>::make_bridge();
+    genesis_promise_ = std::move(promise);
+    genesis_ = std::move(awaiter);
+  }
 
-    last_mc_finalized_seqno_ = last_consensus_finalized_seqno_ = CandidateParent{bus, std::nullopt}.seqno();
+  template <>
+  void handle(BusHandle, std::shared_ptr<const Start> event) {
+    auto seqno = CandidateParent{*event, std::nullopt}.seqno();
+    last_mc_finalized_seqno_ = std::max(last_mc_finalized_seqno_, seqno);
+    last_consensus_finalized_seqno_ = std::max(last_consensus_finalized_seqno_, seqno);
+
+    genesis_promise_.set_value(std::move(event));
   }
 
   template <>
@@ -71,8 +80,8 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
 
   template <>
   void handle(BusHandle, std::shared_ptr<const BlockFinalized> event) {
-    if (event->signatures->is_final()) {
-      last_consensus_finalized_seqno_ = event->candidate->id.block.seqno();
+    if (event->final_signatures) {
+      last_consensus_finalized_seqno_ = std::max(last_consensus_finalized_seqno_, event->candidate.block.seqno());
     }
   }
 
@@ -93,11 +102,27 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
 
   template <>
   void handle(BusHandle, std::shared_ptr<const BlockFinalizedInMasterchain> event) {
-    last_mc_finalized_seqno_ = event->block.seqno();
+    last_mc_finalized_seqno_ = std::max(event->block.seqno(), last_mc_finalized_seqno_);
+    last_consensus_finalized_seqno_ = std::max(last_mc_finalized_seqno_, last_consensus_finalized_seqno_);
   }
 
  private:
-  bool should_generate_empty_block(BlockSeqno new_seqno) {
+  bool is_before_split(const std::vector<td::Ref<BlockData>>& prev_block_data) {
+    if (prev_block_data.size() != 1 || prev_block_data[0]->block_id().shard_full() != owning_bus()->shard) {
+      return false;
+    }
+    auto result = get_before_split(prev_block_data[0]);
+    if (result.is_error()) {
+      LOG(INFO) << "Failed to get before_split of the previous block: " << result.move_as_error();
+      return false;
+    }
+    return result.move_as_ok();
+  }
+
+  bool should_generate_empty_block(BlockSeqno new_seqno, const std::vector<td::Ref<BlockData>>& prev_block_data) {
+    if (is_before_split(prev_block_data)) {
+      return true;
+    }
     if (owning_bus()->shard.is_masterchain()) {
       return last_consensus_finalized_seqno_ + 1 < new_seqno;
     } else {
@@ -115,7 +140,8 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
 
     td::Timestamp target_time = event->start_time;
 
-    CandidateParent parent{bus, event->base};
+    auto genesis = co_await genesis_.get();
+    CandidateParent parent{*genesis, event->base};
 
     td::uint32 slot = event->start_slot;
 
@@ -133,7 +159,7 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
 
       owning_bus().publish<StatsTargetReached>(StatsTargetReached::CollateStarted, slot);
 
-      if (should_generate_empty_block(new_seqno)) {
+      if (should_generate_empty_block(new_seqno, prev_block_data)) {
         LOG(WARNING) << "Generating an empty block for slot " << slot << "! new_seqno=" << new_seqno
                      << ", last_consensus_finalized_seqno_=" << last_consensus_finalized_seqno_
                      << ", last_mc_finalized_seqno_=" << last_mc_finalized_seqno_;
@@ -150,7 +176,7 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
         // FIXME: What to do if collate_block suddenly fails?
         CollateParams params{
             .shard = bus.shard,
-            .min_masterchain_block_id = bus.min_masterchain_block_id,
+            .min_masterchain_block_id = genesis->min_masterchain_block_id,
             .prev = parent.parent_blocks(),
             .creator = Ed25519_PublicKey{bus.local_id.key.ed25519_value().raw()},
             .prev_block_data = prev_block_data,
@@ -198,6 +224,8 @@ class BlockProducerImpl : public runtime::SpawnsWith<Bus>, public runtime::Conne
     co_return {};
   }
 
+  td::Promise<StartEvent> genesis_promise_;
+  SharedFuture<StartEvent> genesis_;
   std::optional<td::uint32> current_leader_window_;
   td::CancellationTokenSource cancellation_source_;
 

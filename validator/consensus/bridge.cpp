@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: LGPL-2.0-or-later
  */
 
+#include "quic/quic-sender.h"
 #include "td/db/RocksDb.h"
 #include "td/utils/port/path.h"
 #include "validator-session/validator-session-types.h"
@@ -97,6 +98,46 @@ class ManagerFacadeImpl : public ManagerFacade {
   td::Ref<ValidatorManagerOptions> opts_;
 };
 
+class DbImpl : public Db {
+ public:
+  explicit DbImpl(std::string path) {
+    td::mkpath(path).ensure();
+    auto rocksdb = td::RocksDb::open(path).ensure().move_as_ok();
+    reader_ = rocksdb.snapshot();
+    writer_ = td::KeyValueAsync<td::BufferSlice, td::BufferSlice>(std::make_shared<td::RocksDb>(std::move(rocksdb)));
+  }
+
+  std::optional<td::BufferSlice> get(td::Slice key) const override {
+    std::string value;
+    auto result = reader_->get(key, value).ensure().move_as_ok();
+    if (result == td::KeyValueReader::GetStatus::Ok) {
+      return td::BufferSlice(value);
+    }
+    return std::nullopt;
+  }
+  std::vector<std::pair<td::BufferSlice, td::BufferSlice>> get_by_prefix(td::uint32 prefix) const override {
+    td::uint32 prefix2 = prefix + 1;
+    td::Slice begin{(const char*)&prefix, 4};
+    td::Slice end{(const char*)&prefix2, 4};
+    std::vector<std::pair<td::BufferSlice, td::BufferSlice>> result;
+    reader_
+        ->for_each_in_range(begin, end,
+                            [&](td::Slice key, td::Slice value) -> td::Status {
+                              result.emplace_back(key, value);
+                              return td::Status::OK();
+                            })
+        .ensure();
+    return result;
+  }
+  td::actor::Task<> set(td::BufferSlice key, td::BufferSlice value) override {
+    co_return co_await writer_.set(std::move(key), std::move(value));
+  }
+
+ private:
+  td::KeyValueAsync<td::BufferSlice, td::BufferSlice> writer_;
+  std::unique_ptr<td::KeyValueReader> reader_;
+};
+
 struct BridgeCreationParams {
   std::string name;
   bool is_create_session_called;
@@ -111,14 +152,12 @@ struct BridgeCreationParams {
 
   td::actor::ActorId<CollationManager> collation_manager;
   NewConsensusConfig config;
-  BlockIdExt min_masterchain_block_id = {};
 
   ValidatorSessionId session_id;
   td::actor::ActorId<overlay::Overlays> overlays;
   td::actor::ActorId<rldp2::Rldp> rldp2;
+  td::actor::ActorId<quic::QuicSender> quic;
   std::string db_root;
-
-  std::vector<BlockIdExt> first_block_parents = {};
 };
 
 class BridgeImpl final : public IValidatorGroup {
@@ -130,15 +169,14 @@ class BridgeImpl final : public IValidatorGroup {
   virtual void start(std::vector<BlockIdExt> prev, BlockIdExt min_masterchain_block_id) override {
     CHECK(!is_start_called_);
     is_start_called_ = true;
-    params_.min_masterchain_block_id = min_masterchain_block_id;
-    params_.first_block_parents = prev;
-    try_start();
+    start_event_ = std::make_shared<Start>(prev, min_masterchain_block_id);
+    maybe_start_group();
   }
 
   virtual void create_session() override {
     CHECK(!is_create_session_called_);
     is_create_session_called_ = true;
-    try_start();
+    maybe_start_group();
   }
 
   virtual void update_options(td::Ref<ValidatorManagerOptions> opts, bool apply_blocks) override {
@@ -161,12 +199,7 @@ class BridgeImpl final : public IValidatorGroup {
     destroy_inner().start().detach();
   }
 
- private:
-  void try_start() {
-    if (!is_start_called_ || !is_create_session_called_ || is_started_) {
-      return;
-    }
-
+  void start_up() override {
     manager_facade_ = td::actor::create_actor<ManagerFacadeImpl>(params_.name + ".ManagerFacade", params_.manager,
                                                                  params_.collation_manager, params_.validator_set,
                                                                  params_.validator_opts);
@@ -218,21 +251,15 @@ class BridgeImpl final : public IValidatorGroup {
     CHECK(found);
 
     bus->config = std::move(params_.config);
-    bus->min_masterchain_block_id = params_.min_masterchain_block_id;
 
     bus->session_id = params_.session_id;
     bus->overlays = params_.overlays;
     bus->rldp2 = params_.rldp2;
-
-    bus->first_block_parents = std::move(params_.first_block_parents);
+    bus->quic = params_.quic;
 
     bus->populate_collator_schedule();
 
-    std::string db_dir = db_path() + "/db/";
-    td::mkpath(db_dir).ensure();
-    auto rocksdb = td::RocksDb::open(db_dir).ensure().move_as_ok();
-    bus->db_reader = rocksdb.snapshot();
-    bus->db = DbType(std::make_shared<td::RocksDb>(std::move(rocksdb)));
+    bus->db = std::make_unique<DbImpl>(db_path() + "/db/");
 
     auto [stop_waiter, stop_promise] = td::actor::StartedTask<>::make_bridge();
     stop_waiter_ = std::move(stop_waiter);
@@ -246,20 +273,24 @@ class BridgeImpl final : public IValidatorGroup {
     StatsCollector::register_in(runtime);
 
     if (is_simplex) {
+      auto simplex_bus = std::static_pointer_cast<simplex::Bus>(bus);
+      simplex_bus->load_bootstrap_state();
+
       simplex::CandidateResolver::register_in(runtime);
       simplex::Consensus::register_in(runtime);
       simplex::Pool::register_in(runtime);
 
-      bus_ = runtime.start(std::static_pointer_cast<simplex::Bus>(bus), params_.name);
+      bus_ = runtime.start(simplex_bus, params_.name);
     } else {
+      auto null_bus = std::static_pointer_cast<null::Bus>(bus);
+
       null::Consensus::register_in(runtime);
 
-      bus_ = runtime.start(std::static_pointer_cast<null::Bus>(bus), params_.name);
+      bus_ = runtime.start(null_bus, params_.name);
     }
-
-    is_started_ = true;
   }
 
+ private:
   td::actor::Task<> destroy_inner() {
     if (is_started_) {
       LOG(INFO) << "Destroying validator group";
@@ -273,6 +304,14 @@ class BridgeImpl final : public IValidatorGroup {
     co_return td::Unit{};
   }
 
+  void maybe_start_group() {
+    if (!is_create_session_called_ || !is_start_called_ || is_started_) {
+      return;
+    }
+    is_started_ = true;
+    bus_.publish(start_event_);
+  }
+
   bool is_start_called_ = false;
   bool is_create_session_called_ = false;
   bool is_started_ = false;
@@ -282,6 +321,8 @@ class BridgeImpl final : public IValidatorGroup {
 
   BusHandle bus_;
   td::optional<td::actor::StartedTask<>> stop_waiter_;
+
+  std::shared_ptr<Start> start_event_;
 
   std::string db_path() const {
     return PSTRING() << params_.db_root << "/consensus/consensus." << params_.shard.workchain << "."
@@ -298,7 +339,7 @@ td::actor::ActorOwn<IValidatorGroup> IValidatorGroup::create_bridge(
     td::Ref<block::ValidatorSet> validator_set, BlockSeqno last_key_block_seqno, NewConsensusConfig config,
     td::actor::ActorId<keyring::Keyring> keyring, td::actor::ActorId<adnl::Adnl> adnl,
     td::actor::ActorId<rldp::Rldp> rldp, td::actor::ActorId<rldp2::Rldp> rldp2,
-    td::actor::ActorId<overlay::Overlays> overlays, std::string db_root,
+    td::actor::ActorId<quic::QuicSender> quic, td::actor::ActorId<overlay::Overlays> overlays, std::string db_root,
     td::actor::ActorId<ValidatorManager> validator_manager, td::actor::ActorId<CollationManager> collation_manager,
     bool create_session, bool allow_unsafe_self_blocks_resync, td::Ref<ValidatorManagerOptions> opts,
     bool monitoring_shard) {
@@ -318,6 +359,7 @@ td::actor::ActorOwn<IValidatorGroup> IValidatorGroup::create_bridge(
       .session_id = std::move(session_id),
       .overlays = overlays,
       .rldp2 = rldp2,
+      .quic = quic,
       .db_root = db_root,
   };
   return td::actor::create_actor<consensus::BridgeImpl>(name_with_seqno, std::move(params));
