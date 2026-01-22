@@ -202,6 +202,10 @@ class ParserLogs(Parser):
                             t1_ms=end_event.t_ms,
                         )
                     )
+                    if start_event_name == "collate_started":  # if collation was less than 1 ms add points collate started / ended to detailgraph
+                        if end_event.t_ms - e.t_ms <= 1:
+                            self._events.append(e)
+                            self._events.append(end_event)
 
     def _infer_slot_phases(self):
         for slot_id, slot_data in self._slots.items():
