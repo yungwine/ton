@@ -481,6 +481,11 @@ void OverlayImpl::send_broadcast_fec(PublicKeyHash send_as, td::uint32 flags, td
     VLOG(OVERLAY_WARNING) << "broadcast source certificate is invalid";
     return;
   }
+
+  // hash bytes
+  auto hash = sha256(data);
+  LOG(ERROR) << "send_broadcast_fec with " << td::format::as_hex_dump<0>(td::Slice(hash));
+
   if (opts_.send_twostep_broadcast_) {
     broadcasts_twostep_.send(this, send_as, std::move(data), flags);
   } else {
