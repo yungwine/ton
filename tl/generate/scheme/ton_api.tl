@@ -1220,5 +1220,19 @@ consensus.simplex.db.candidateResolver.candidateInfo leader_id:int candidate_has
 consensus.simplex.db.key.candidateResolver.notarCert candidateId:consensus.candidateId = consensus.simplex.db.key.candidateResolver.NotarCert;
 consensus.simplex.db.candidateResolver.notarCert notar:consensus.simplex.voteSignatureSet = consensus.simplex.db.candidateResolver.NotarCert;
 
+consensus.stats.id idx:int total_validators:int weight:long total_weight:long slots_per_leader_window:int = consensus.stats.Event;
+consensus.stats.collateStarted target_slot:int = consensus.stats.Event;
+consensus.stats.collateFinished target_slot:int candidateId:consensus.candidateId block:tonNode.blockIdExt = consensus.stats.Event;
+consensus.stats.collatedEmpty candidateId:consensus.candidateId = consensus.stats.Event;
+consensus.stats.candidateReceived candidateId:consensus.candidateId = consensus.stats.Event;
+consensus.stats.validationStarted candidateId:consensus.candidateId = consensus.stats.Event;
+consensus.stats.validationFinished candidateId:consensus.candidateId = consensus.stats.Event;
+consensus.stats.blockAccepted candidateId:consensus.candidateId = consensus.stats.Event;
+consensus.stats.timestampedEvent ts:double event:consensus.stats.Event = consensus.stats.TimestampedEvent;
+consensus.stats.events id:int256 events:(vector consensus.stats.timestampedEvent) = consensus.stats.Events;
+
+consensus.simplex.stats.voted vote:consensus.simplex.UnsignedVote = consensus.stats.Event;
+consensus.simplex.stats.certObserved vote:consensus.simplex.UnsignedVote = consensus.stats.Event;
+
 ---functions---
 consensus.simplex.requestCandidate id:consensus.CandidateId want_candidate:Bool want_notar:Bool = consensus.simplex.CandidateAndCert;

@@ -178,10 +178,6 @@ class PrivateOverlayImpl : public runtime::SpawnsWith<Bus>, public runtime::Conn
                    << maybe_candidate.move_as_error();
       return;
     }
-
-    // FIXME: We should first check with consensus if slot makes sense and candidate is expected and
-    //        only then publish stats target.
-    owning_bus().publish<StatsTargetReached>(StatsTargetReached::CandidateReceived, maybe_candidate.ok()->id.slot);
     owning_bus().publish<CandidateReceived>(maybe_candidate.move_as_ok());
   }
 
