@@ -235,4 +235,23 @@ class CollatorSchedule : public td::CntObject {
   }
 };
 
+namespace stats {
+
+namespace tl {
+
+using Event = ton_api::consensus_stats_Event;
+using EventRef = tl_object_ptr<Event>;
+
+}  // namespace tl
+
+class Event {
+ public:
+  virtual ~Event() = default;
+
+  virtual tl::EventRef to_tl() const = 0;
+  virtual std::string to_string() const = 0;
+};
+
+}  // namespace stats
+
 }  // namespace ton::validator::consensus

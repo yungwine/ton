@@ -86,11 +86,6 @@ class ManagerFacadeImpl : public ManagerFacade {
                                       validator_set_->get_catchain_seqno(), validator_set_->get_validator_set_hash());
   }
 
-  void log_validator_session_stats(validatorsession::ValidatorSessionStats stats) override {
-    stats.cc_seqno = validator_set_->get_catchain_seqno();
-    td::actor::send_closure(manager_, &ValidatorManager::log_validator_session_stats, std::move(stats));
-  }
-
   void send_block_candidate_broadcast(BlockIdExt id, td::BufferSlice data, int mode) override {
     td::actor::send_closure(manager_, &ValidatorManager::send_block_candidate_broadcast, id,
                             validator_set_->get_catchain_seqno(), validator_set_->get_validator_set_hash(),
