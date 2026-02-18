@@ -18,6 +18,7 @@ class DashApp:
         parser: Parser,
         explorer_url: str | None = None,
         show_validator_set_bin: str | None = None,
+        validator_names_json: str | None = None,
     ):
         self._parser = parser
         self._data = self._parser.parse()
@@ -26,12 +27,12 @@ class DashApp:
         self._validator_set_provider = ValidatorSetInfoProvider(
             explorer_url=explorer_url,
             show_validator_set_bin=show_validator_set_bin,
+            validator_names_json=validator_names_json,
         )
 
     def update_data(self, href: str | None):
         self._data = self._parser.parse()
         self._builder = FigureBuilder(self._data)
-        self._validator_set_provider.prune_cache(self._data.slots)
         valgroups = sorted(set(s.valgroup_id for s in self._data.slots))
         options = [{"label": g, "value": g} for g in valgroups]
 

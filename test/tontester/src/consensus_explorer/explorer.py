@@ -13,11 +13,13 @@ def target(
     port: int,
     explorer_url: str | None = None,
     show_validator_set_bin: str | None = None,
+    validator_names_json: str | None = None,
 ):
     DashApp(
         parser,
         explorer_url=explorer_url,
         show_validator_set_bin=show_validator_set_bin,
+        validator_names_json=validator_names_json,
     ).run(debug, host, port)
 
 
@@ -30,12 +32,14 @@ class ConsensusExplorer:
         port: int = 8050,
         explorer_url: str | None = None,
         show_validator_set_bin: str | None = None,
+        validator_names_json: str | None = None,
     ):
         self._logs_path = logs_path
         self._host = host
         self._port = port
         self._explorer_url = explorer_url
         self._show_validator_set_bin = show_validator_set_bin
+        self._validator_names_json = validator_names_json
         self.__process: Process | None = None
 
     def run(self):
@@ -48,6 +52,7 @@ class ConsensusExplorer:
                 "port": self._port,
                 "explorer_url": self._explorer_url,
                 "show_validator_set_bin": self._show_validator_set_bin,
+                "validator_names_json": self._validator_names_json,
             },
         )
         self.__process.start()
@@ -87,6 +92,11 @@ def _main():
             "(default: build/utils/show-validator-set)"
         ),
     )
+    _ = parser.add_argument(
+        "--validator-names-json",
+        default=os.getenv("CONSENSUS_EXPLORER_VALIDATOR_NAMES_JSON", ""),
+        help='Path to json map {"adnl": "name"} used for validator names',
+    )
 
     args = parser.parse_args()
     logs = cast(list[str], args.logs)
@@ -94,6 +104,7 @@ def _main():
     port = cast(int, args.port)
     block_explorer_url = cast(str, args.block_explorer_url) or None
     show_validator_set_bin = cast(str, args.show_validator_set_bin) or None
+    validator_names_json = cast(str, args.validator_names_json) or None
 
     log_paths = [Path(log) for log in logs]
     if len(log_paths) == 1 and log_paths[0].is_dir():
@@ -102,6 +113,7 @@ def _main():
         ParserSessionStats(log_paths),
         explorer_url=block_explorer_url,
         show_validator_set_bin=show_validator_set_bin,
+        validator_names_json=validator_names_json,
     )
 
     app.run(debug=True, host=host, port=port)

@@ -1,4 +1,6 @@
+import json
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -16,10 +18,17 @@ class ValidatorSetInfoProvider:
     _MASTERCHAIN_WORKCHAIN = -1
     _MASTERCHAIN_SHARD_HEX = "8000000000000000"
     _VALGROUP_RE = re.compile(r"^(?P<workchain>-?\d+),(?P<shard>[0-9a-fA-F]+)\.(?P<cc_seqno>\d+)$")
+    _ROW_RE = re.compile(r"^\s*(\d+)\s+\S+\s+([0-9a-fA-F]{64})\s+\d+\s*$")
 
-    def __init__(self, explorer_url: str | None = None, show_validator_set_bin: str | Path | None = None):
+    def __init__(
+        self,
+        explorer_url: str | None = None,
+        show_validator_set_bin: str | Path | None = None,
+        validator_names_json: str | Path | None = None,
+    ):
         self._explorer_url: str | None = explorer_url.rstrip("/") if explorer_url else ""
         self._show_validator_set_bin: str | None = self._resolve_show_validator_set_bin(show_validator_set_bin)
+        self._validator_names: dict[str, str] = self._load_validator_names(validator_names_json)
 
     @staticmethod
     def _resolve_show_validator_set_bin(path: str | Path | None) -> Path | None:
@@ -32,6 +41,23 @@ class ValidatorSetInfoProvider:
         if default_in_cwd.exists():
             return default_in_cwd
         return None
+
+    @staticmethod
+    def _load_validator_names(path: str | Path | None) -> dict[str, str]:
+        if not path:
+            return {}
+
+        names_path = Path(path)
+        try:
+            raw_json = names_path.read_text(encoding="utf-8")
+            parsed = json.loads(raw_json)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        return parsed
 
     @classmethod
     def _parse_valgroup_id(cls, valgroup_id: str) -> tuple[int, str, int] | None:
@@ -156,6 +182,26 @@ class ValidatorSetInfoProvider:
             raise RuntimeError(f"{self._show_validator_set_bin} returned empty output")
         return output
 
+    @classmethod
+    def _parse_validator_rows(cls, output: str) -> list[tuple[int, str]]:
+        rows: list[tuple[int, str]] = []
+        for line in output.splitlines():
+            match = cls._ROW_RE.match(line)
+            if match is not None:
+                rows.append((int(match.group(1)), match.group(2)))
+                continue
+        return rows
+
+    def _build_table(self, output: str) -> str:
+        rows = self._parse_validator_rows(output)
+        if not rows:
+            raise RuntimeError("failed to parse validator rows from show-validator-set output")
+
+        table_lines = ["idx | adnl | name"]
+        for idx, adnl in rows:
+            table_lines.append(f"{idx} | {adnl} | {self._validator_names.get(adnl, '')}")
+        return "\n".join(table_lines)
+
     def _fetch_validator_set_info(
         self,
         valgroup_id: str,
@@ -219,6 +265,7 @@ class ValidatorSetInfoProvider:
                 group_shard_hex=group_shard_hex,
                 cc_seqno=cc_seqno,
             )
+        validator_set_table = self._build_table(validator_set_output)
 
         return "\n".join(
             [
@@ -228,7 +275,7 @@ class ValidatorSetInfoProvider:
                 f"roothash = {root_hash}",
                 f"filehash = {file_hash}",
                 "",
-                validator_set_output,
+                validator_set_table,
             ]
         )
 
@@ -236,7 +283,7 @@ class ValidatorSetInfoProvider:
         if not self._explorer_url:
             return "validator set info: explorer url is not configured"
 
-        if not self._show_validator_set_bin:
+        if self._show_validator_set_bin is None:
             return "validator set info: show-validator-set binary is not configured"
 
         parsed_group = self._parse_valgroup_id(valgroup_id)
