@@ -55,6 +55,7 @@ class ParserSessionStats(Parser):
         self._votes: dict[slot_id_type, dict[str, list[VoteData]]] = {}
         self._total_weights: dict[str, int] = {}
         self._total_validators: dict[str, int] = {}
+        self._slots_per_leader_window: dict[str, int] = {}
         self._seen_validators: dict[str, set[int]] = {}
         self._slot_events: dict[slot_id_type, dict[int, dict[str, EventData]]] = {}
         self._events: list[EventData] = []
@@ -80,7 +81,23 @@ class ParserSessionStats(Parser):
                 collator=None,
             )
 
-        return self._slots[slot_id]
+        slot_data = self._slots[slot_id]
+        if slot_data.collator is None:
+            slot_data.collator = self._calculate_slot_collator(v_group, slot)
+
+        return slot_data
+
+    def _calculate_slot_collator(self, v_group: str, slot: int) -> int | None:
+        slots_per_leader_window = self._slots_per_leader_window.get(v_group)
+        total_validators = self._total_validators.get(v_group)
+        if (
+            slots_per_leader_window is None
+            or slots_per_leader_window <= 0
+            or total_validators is None
+            or total_validators <= 0
+        ):
+            return None
+        return slot // slots_per_leader_window % total_validators
 
     def _parse_stats_event(
         self,
@@ -88,7 +105,6 @@ class ParserSessionStats(Parser):
         t_ms: float,
         v_group: str,
         v_id: int,
-        get_slot_leader: Callable[[int], int],
     ):
         if not isinstance(event, tuple(TARGET_TO_LABEL.keys())):
             return
@@ -102,7 +118,6 @@ class ParserSessionStats(Parser):
         slot_id = (v_group, slot)
 
         slot_data = self._get_create_slot(slot, v_group)
-        slot_data.collator = get_slot_leader(slot)
 
         slot_data.slot_start_est_ms = min(t_ms, slot_data.slot_start_est_ms)
 
@@ -416,6 +431,7 @@ class ParserSessionStats(Parser):
         v_weight = event_id.weight
         self._total_weights[v_group] = event_id.total_weight
         self._total_validators[v_group] = event_id.total_validators
+        self._slots_per_leader_window[v_group] = event_id.slots_per_leader_window
         self._seen_validators.setdefault(v_group, set()).add(v_id)
 
         def get_slot_leader(slot: int):
@@ -430,7 +446,7 @@ class ParserSessionStats(Parser):
             elif isinstance(ev, Consensus_simplex_stats_certObserved):
                 self._parse_cert_observed(ev, t_ms, v_group, v_id, get_slot_leader)
             else:
-                self._parse_stats_event(ev, t_ms, v_group, v_id, get_slot_leader)
+                self._parse_stats_event(ev, t_ms, v_group, v_id)
 
     def _clear_state(self) -> None:
         self._slots = {}
@@ -438,6 +454,7 @@ class ParserSessionStats(Parser):
         self._votes = {}
         self._total_weights = {}
         self._total_validators = {}
+        self._slots_per_leader_window = {}
         self._seen_validators = {}
         self._slot_events = {}
         self._events = []
