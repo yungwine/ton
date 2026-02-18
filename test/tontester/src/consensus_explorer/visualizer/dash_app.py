@@ -7,20 +7,31 @@ from dash.exceptions import PreventUpdate
 
 from ..models import SlotData
 from ..parser import Parser
+from ..validator_set_info import ValidatorSetInfoProvider
 from .figure_builder import FigureBuilder
 
 
 @final
 class DashApp:
-    def __init__(self, parser: Parser):
+    def __init__(
+        self,
+        parser: Parser,
+        explorer_url: str | None = None,
+        show_validator_set_bin: str | None = None,
+    ):
         self._parser = parser
         self._data = self._parser.parse()
         self._builder: FigureBuilder = FigureBuilder(self._data)
         self._app: Dash = Dash(__name__)
+        self._validator_set_provider = ValidatorSetInfoProvider(
+            explorer_url=explorer_url,
+            show_validator_set_bin=show_validator_set_bin,
+        )
 
     def update_data(self, href: str | None):
         self._data = self._parser.parse()
         self._builder = FigureBuilder(self._data)
+        self._validator_set_provider.prune_cache(self._data.slots)
         valgroups = sorted(set(s.valgroup_id for s in self._data.slots))
         options = [{"label": g, "value": g} for g in valgroups]
 
@@ -83,6 +94,11 @@ class DashApp:
         if isinstance(valgroup_id, str) and isinstance(slot, int):
             return {"valgroup_id": valgroup_id, "slot": slot}
         return None
+
+    def _update_group_validator_set(self, group: str | None) -> str:
+        if not group:
+            return "validator set info: none"
+        return self._validator_set_provider.get_validator_set_text(group, self._data.slots)
 
     def run(self, debug: bool = True, host: str = "127.0.0.1", port: int = 8050) -> None:
         self._setup_layout()
@@ -172,6 +188,26 @@ class DashApp:
                         "flexWrap": "wrap",
                         "alignItems": "center",
                         "padding": "12px 16px",
+                    },
+                ),
+                html.Div(
+                    [
+                        html.Pre(
+                            id="group-validator-set",
+                            children="validator set info: none",
+                            style={
+                                "margin": "0",
+                                "fontSize": "14px",
+                                "border": "1px solid #ddd",
+                                "borderRadius": "4px",
+                                "padding": "8px 10px",
+                                "whiteSpace": "pre-wrap",
+                                "overflowX": "auto",
+                            },
+                        )
+                    ],
+                    style={
+                        "margin": "0 16px 10px 16px",
                     },
                 ),
                 dcc.Store(id="selected", data={"valgroup_id": "", "slot": 0}),
@@ -394,6 +430,11 @@ class DashApp:
             Output("group", "value"),
             Input("url", "href"),
         )(self.update_data)
+
+        self._app.callback(  # pyright: ignore[reportUnknownMemberType]
+            Output("group-validator-set", "children"),
+            Input("group", "value"),
+        )(self._update_group_validator_set)
 
         self._app.callback(  # pyright: ignore[reportUnknownMemberType]
             Output("selected", "data"),
