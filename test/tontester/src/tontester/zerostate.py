@@ -20,7 +20,7 @@ class NullConsensusConfig:
 
 @dataclass
 class SimplexConsensusConfig:
-    target_block_rate_ms: int = 1000
+    target_block_rate_ms: int = 700
     slots_per_leader_window: int = 4
     first_block_timeout_ms: int = 1000
     max_leader_window_desync: int = 2
@@ -37,6 +37,7 @@ class NetworkConfig:
     mc_consensus: SimplexConsensusConfig | NullConsensusConfig | None = None
     shard_valgroup_lifetime: int = 250
     shard_consensus: SimplexConsensusConfig | NullConsensusConfig | None = None
+    spam: bool = True
 
 
 @dataclass
@@ -63,6 +64,79 @@ class Zerostate:
     def as_validator_config(self):
         return ton_api.Validator_config_global(zero_state=self.as_block())
 
+spammer_on = """
+// Masterchain kick contract - triggers shardchain spammer on every tick
+<{
+  0 PUSHINT
+  DUP
+  24 PUSHINT
+  NEWC
+  6 STU
+  c4 PUSHCTR
+  CTOS
+  STSLICER
+  1000000000 PUSHINT
+  STGRAMS
+  107 STU
+  32 STU
+  ENDC
+  3 PUSHINT
+  SENDRAWMSG
+}>c // code
+<b b{10} s, b{0} s, 0 8 i, AllOnes 7 * 256 u, b> // data: shardchain spammer address
+empty_cell // libraries
+GR$1000000 // balance
+0 // split_depth
+2 // ticktock
+AllOnes 9 * // address
+6 // mode: create+setaddr
+register_smc
+dup make_special dup constant kick_addr
+."kick address = " 64x. cr
+"""
+spammer_off = ""
+
+_BASECHAIN_SPAMMER_TEMPLATE = """
+"TonUtil.fif" include
+"Asm.fif" include
+
+256 1<<1- 15 / constant AllOnes
+
+0 setworkchain
+-777 setglobalid
+
+<{
+  0 PUSHINT
+  DUP
+  24 PUSHINT
+  NEWC
+  6 STU
+  MYADDR
+  STSLICER
+  1000000000 PUSHINT
+  STGRAMS
+  107 STU
+  32 STU
+  ENDC
+  3 PUSHINT
+  SENDRAWMSG
+}>c // code
+<b b> // data
+empty_cell // libraries
+GR$1000000 // balance
+0 // split_depth
+0 // ticktock
+AllOnes 7 * // address
+6 // mode: create+setaddr
+register_smc
+."spam address = " 64x. cr
+
+create_state
+dup 31 boc+>B dup "basestate0.boc" B>file
+Bhashu dup =: basestate0_fhash 256 u>B "basestate0.fhash" B>file
+hashu dup =: basestate0_rhash 256 u>B "basestate0.rhash" B>file
+"""
+
 
 _TEMPLATE = """
 "TonUtil.fif" include
@@ -77,8 +151,6 @@ wc_master setworkchain
 
 // Initial state of Workchain 0 (Basic workchain)
 
-0 mkemptyShardState
-
 {{ <b x{{a7}} s, 5 roll 32 u, 4 roll 8 u, 3 roll 8 u, rot 8 u, x{{e000}} s,
   3 roll 256 u, rot 256 u, 0 32 u, x{{1}} s, -1 32 i, 0 64 u, x{{0}} s, 20 32 u, 20 32 u, 10 32 u, 1000 32 u, 0 8 u, b>
   dup isWorkchainDescr? not abort"invalid WorkchainDescr created"
@@ -86,9 +158,7 @@ wc_master setworkchain
   workchain-dict !
 }} : add-std-workchain-v2
 
-dup dup 31 boc+>B dup "basestate0.boc" B>file
-Bhashu dup =: basestate0_fhash 256 u>B "basestate0.fhash" B>file
-hashu dup =: basestate0_rhash 256 u>B "basestate0.rhash" B>file
+{basestate_init}
 basestate0_rhash basestate0_fhash now {monitor_min_split} {split} dup 0 add-std-workchain-v2
 config.workchains!
 
@@ -191,6 +261,8 @@ Masterchain swap
 ."elector smart contract address = " 2dup .addr cr 2dup 7 .Addr cr
 "elector" +".addr" save-address-verbose
 
+{spammer}
+
 /*
  *
  * Configuration Parameters
@@ -276,6 +348,7 @@ config.new_consensus_params_all!
 }} : collator-entry
 {{ -rot dup sbits rot swap [[ <{{ DICTSET }}>s ]] 0 runvmx abort"dict-insert failed" }} : dict-insert
 
+
 /*
  *
  * SmartContract #5 (Configuration smart contract)
@@ -296,6 +369,7 @@ Masterchain swap
 ."config smart contract address = " 2dup .addr cr 2dup 7 .Addr cr
 "config-master" +".addr" save-address-verbose
 // Other data
+
 
 /*
  *
@@ -339,6 +413,22 @@ def create_zerostate(
         else:
             new_consensus_config += "null\n"
 
+    if config.spam:
+        # Create basechain state with spammer first
+        run_fift(install, _BASECHAIN_SPAMMER_TEMPLATE, state_dir)
+        fhash = (state_dir / "basestate0.fhash").read_bytes().hex()
+        rhash = (state_dir / "basestate0.rhash").read_bytes().hex()
+        basestate_init = f"0x{rhash} =: basestate0_rhash\n0x{fhash} =: basestate0_fhash"
+        spammer = spammer_on
+    else:
+        basestate_init = (
+            '0 mkemptyShardState\n'
+            'dup dup 31 boc+>B dup "basestate0.boc" B>file\n'
+            'Bhashu dup =: basestate0_fhash 256 u>B "basestate0.fhash" B>file\n'
+            'hashu dup =: basestate0_rhash 256 u>B "basestate0.rhash" B>file'
+        )
+        spammer = spammer_off
+
     run_fift(
         install,
         _TEMPLATE.format(
@@ -352,6 +442,8 @@ def create_zerostate(
             mc_valgroup_lifetime=config.mc_valgroup_lifetime,
             shard_valgroup_lifetime=config.shard_valgroup_lifetime,
             new_consensus_config=new_consensus_config,
+            basestate_init=basestate_init,
+            spammer=spammer,
         ),
         state_dir,
     )
