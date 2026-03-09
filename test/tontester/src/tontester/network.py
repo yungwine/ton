@@ -278,7 +278,7 @@ class Network:
         assert self._status == _Status.INITED
 
         state_dir = self._directory / "state"
-        state_dir.mkdir()
+        state_dir.mkdir(exist_ok=True)
 
         self.__zerostate = create_zerostate(
             self._install,
