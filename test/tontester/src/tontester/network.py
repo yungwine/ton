@@ -202,7 +202,7 @@ class Network:
             self._static_nodes.append(dht)
 
         @abstractmethod
-        async def run(self, *, debug: DebugType = None):
+        async def run(self, *, threads: int | None = None, debug: DebugType = None):
             pass
 
         async def stop(self):
@@ -394,8 +394,8 @@ class DHTNode(Network.Node):
         return self._signed_address
 
     @override
-    async def run(self, *, debug: DebugType = None):
-        await self._run(self._install.dht_server_exe, self._local_config, None, [], debug=debug)
+    async def run(self, *, threads: int | None = None, debug: DebugType = None):
+        await self._run(self._install.dht_server_exe, self._local_config, None, ['--threads', str(threads)] if threads is not None else [], debug=debug)
 
 
 @final
@@ -497,7 +497,7 @@ class FullNode(Network.Node):
         return self._validator_key
 
     @override
-    async def run(self, *, debug: DebugType = None):
+    async def run(self, *, threads: int | None = None, debug: DebugType = None):
         zerostate = self._get_or_generate_zerostate()
 
         if not self._static_populated:
@@ -511,7 +511,7 @@ class FullNode(Network.Node):
             self._install.validator_engine_exe,
             self._local_config,
             zerostate.as_validator_config(),
-            ["--initial-sync-delay", "5", "--session-logs", str(self.session_log_path)],
+            ["--initial-sync-delay", "5", "--session-logs", str(self.session_log_path)] + ['--threads', str(threads)] if threads is not None else [],
             debug=debug,
         )
 
