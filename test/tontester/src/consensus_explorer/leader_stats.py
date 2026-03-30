@@ -614,6 +614,11 @@ def _main() -> None:
         help='Path to json map {"adnl": "name"} for validator names',
     )
     _ = ap.add_argument(
+        "--cache-dir",
+        default=os.getenv("CONSENSUS_EXPLORER_CACHE_DIR", ""),
+        help="Directory to cache downloaded key blocks",
+    )
+    _ = ap.add_argument(
         "--text", action="store_true", help="Print text output instead of starting web server"
     )
     _ = ap.add_argument(
@@ -637,6 +642,7 @@ def _main() -> None:
     block_explorer_url: str = raw.block_explorer_url  # pyright: ignore[reportAny]
     show_validator_set_bin: str = raw.show_validator_set_bin  # pyright: ignore[reportAny]
     validator_names_json: str = raw.validator_names_json  # pyright: ignore[reportAny]
+    cache_dir: str = raw.cache_dir  # pyright: ignore[reportAny]
     text: bool = raw.text  # pyright: ignore[reportAny]
     verbose: bool = raw.verbose  # pyright: ignore[reportAny]
     time_from: float | None = raw.time_from  # pyright: ignore[reportAny]
@@ -647,7 +653,8 @@ def _main() -> None:
         if not Path(show_validator_set_bin).exists():
             ap.error(f"show-validator-set binary not found at {show_validator_set_bin}")
         vset_provider = ValidatorSetInfoProvider(
-            block_explorer_url, show_validator_set_bin, validator_names_json
+            block_explorer_url, show_validator_set_bin, validator_names_json,
+            cache_dir=cache_dir or None,
         )
 
     if stats_dir_str:
