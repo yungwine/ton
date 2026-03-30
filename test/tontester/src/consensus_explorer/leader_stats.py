@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import enum
 import os
 import re
 from dataclasses import dataclass, field
@@ -12,6 +13,12 @@ from .parser import GroupParser
 from .validator_set_info import ValidatorSetInfoProvider
 
 
+class SlotStatus(enum.Enum):
+    FINALIZED = "finalized"
+    EMPTY = "empty"
+    SKIPPED = "skipped"
+
+
 @dataclass
 class ValidatorLeaderStats:
     validator_idx: int
@@ -20,6 +27,7 @@ class ValidatorLeaderStats:
     total_leader_slots: int = 0
     finalized: int = 0
     empty: int = 0
+    skipped: int = 0
     unknown: int = 0
 
 
@@ -39,9 +47,11 @@ class LeaderStatsAnalyzer:
         self,
         parser: GroupParser,
         vset_provider: ValidatorSetInfoProvider | None = None,
+        verbose: bool = False,
     ) -> None:
         self._parser = parser
         self._vset_provider = vset_provider
+        self._verbose = verbose
 
     def list_groups(
         self,
@@ -89,6 +99,17 @@ class LeaderStatsAnalyzer:
         # unknown.
         finalized_history = _walk_finalized_chains(directly_finalized, group_slots)
 
+        if self._verbose:
+            print(f"  Group {valgroup_name}: directly finalized slots = {sorted(directly_finalized)}")
+            for s in range(min_slot, max_slot + 1):
+                status = finalized_history.get(s)
+                if status is not None:
+                    sd = group_slots.get(s)
+                    parent_info = ""
+                    if sd is not None:
+                        parent_info = f" parent={sd.parent_block} block={sd.block_id_ext}"
+                    print(f"    slot {s}: {status.value}{parent_info}")
+
         # Per-validator stats
         stats_by_validator: dict[int, ValidatorLeaderStats] = {}
         for v in range(total_validators):
@@ -98,13 +119,15 @@ class LeaderStatsAnalyzer:
             leader = s // slots_per_leader_window % total_validators
             vs = stats_by_validator[leader]
             vs.total_leader_slots += 1
-            if s in finalized_history:
-                if finalized_history[s]:
-                    vs.empty += 1
-                else:
-                    vs.finalized += 1
-            else:
+            status = finalized_history.get(s)
+            if status is None:
                 vs.unknown += 1
+            elif status == SlotStatus.FINALIZED:
+                vs.finalized += 1
+            elif status == SlotStatus.EMPTY:
+                vs.empty += 1
+            elif status == SlotStatus.SKIPPED:
+                vs.skipped += 1
 
         # Enrich with ADNL info if available
         if self._vset_provider and isinstance(group_info, GroupInfo):
@@ -161,6 +184,7 @@ class LeaderStatsAnalyzer:
                 a.total_leader_slots += vs.total_leader_slots
                 a.finalized += vs.finalized
                 a.empty += vs.empty
+                a.skipped += vs.skipped
                 a.unknown += vs.unknown
                 if vs.name and not a.name:
                     a.name = vs.name
@@ -183,48 +207,46 @@ def _parse_parent_slot(parent_block: str | None) -> int | None:
 def _walk_finalized_chains(
     directly_finalized: set[int],
     group_slots: dict[int, SlotData],
-) -> dict[int, bool]:
+) -> dict[int, SlotStatus]:
     """Reconstruct the finalized history by walking parent chains.
 
     For each slot with a finalization certificate, walk parent_block links
-    until we run out of candidate data. Each visited slot is finalized
-    (non-empty), each slot skipped over between consecutive parent links is
-    empty. Everything else is unknown.
+    until we run out of candidate data.
 
-    Returns slot -> is_empty mapping.
+    - Visited slots with a non-empty block -> FINALIZED
+    - Visited slots with an empty block -> EMPTY
+    - Slots skipped over between parent links -> SKIPPED
+    - Everything else is not in the returned dict (unknown).
     """
-    history: dict[int, bool] = {}
+    history: dict[int, SlotStatus] = {}
 
     for start in directly_finalized:
         current = start
         while True:
             if current in history:
-                # Already visited from another chain walk -- the rest of the
-                # chain below is already recorded.
                 break
 
-            history[current] = False  # finalized non-empty
-
             sd = group_slots.get(current)
+            if sd is not None and (sd.block_id_ext == "empty" or sd.is_empty):
+                history[current] = SlotStatus.EMPTY
+            else:
+                history[current] = SlotStatus.FINALIZED
+
             if sd is None:
-                # No candidate data for this slot, can't walk further.
                 break
 
             parent_slot = _parse_parent_slot(sd.parent_block)
 
             if sd.parent_block == "genesis":
-                # Chain starts here; all slots before this are skipped.
                 for s in range(current):
-                    _ = history.setdefault(s, True)
+                    _ = history.setdefault(s, SlotStatus.SKIPPED)
                 break
 
             if parent_slot is None:
-                # Missing parent data, can't walk further.
                 break
 
-            # Slots between the parent and current are skipped.
             for s in range(parent_slot + 1, current):
-                _ = history.setdefault(s, True)
+                _ = history.setdefault(s, SlotStatus.SKIPPED)
 
             current = parent_slot
 
@@ -298,6 +320,7 @@ def _serialize_validator(v: ValidatorLeaderStats) -> dict[str, str | int]:
         "total_leader_slots": v.total_leader_slots,
         "finalized": v.finalized,
         "empty": v.empty,
+        "skipped": v.skipped,
         "unknown": v.unknown,
     }
 
@@ -329,16 +352,16 @@ def format_group_stats(stats: GroupLeaderStats) -> str:
         f"  Observed slots: {stats.observed_slot_range[0]} - {stats.observed_slot_range[1]}",
         f"  Total validators: {stats.total_validators}, leader window: {stats.slots_per_leader_window}",
         "",
-        f"  {'Idx':>4} {'ADNL':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Unknown':>8} {'Fin%':>6}",
-        f"  {'-' * 4} {'-' * 16} {'-' * 12} {'-' * 7} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 6}",
+        f"  {'Idx':>4} {'ADNL':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Fin%':>6}",
+        f"  {'-' * 4} {'-' * 16} {'-' * 12} {'-' * 7} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 8} {'-' * 6}",
     ]
     for v in stats.validators:
-        known = v.finalized + v.empty
-        pct = f"{v.finalized / known * 100:.1f}" if known > 0 else "n/a"
+        known = v.finalized + v.empty + v.skipped
+        pct = f"{(v.finalized + v.empty) / known * 100:.1f}" if known > 0 else "n/a"
         adnl_short = v.adnl[:16] if v.adnl else ""
         name = v.name[:12] if v.name else ""
         lines.append(
-            f"  {v.validator_idx:>4} {adnl_short:>16} {name:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.unknown:>8} {pct:>6}"
+            f"  {v.validator_idx:>4} {adnl_short:>16} {name:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
         )
     return "\n".join(lines)
 
@@ -473,10 +496,10 @@ _HTML_TEMPLATE = """
             }
             const vals = Object.values(data.aggregate);
             vals.sort((a, b) => {
-                const pa = a.finalized + a.empty > 0
-                           ? a.finalized / (a.finalized + a.empty) : 0;
-                const pb = b.finalized + b.empty > 0
-                           ? b.finalized / (b.finalized + b.empty) : 0;
+                const ka = a.finalized + a.empty + a.skipped;
+                const pa = ka > 0 ? (a.finalized + a.empty) / ka : 0;
+                const kb = b.finalized + b.empty + b.skipped;
+                const pb = kb > 0 ? (b.finalized + b.empty) / kb : 0;
                 return pb - pa;
             });
             el.innerHTML = '<h3>Aggregate across all groups</h3>' + renderTable(vals);
@@ -485,10 +508,10 @@ _HTML_TEMPLATE = """
         function renderTable(validators) {
             let html = '<table><tr><th>Idx</th><th>ADNL</th><th>Name</th>';
             html += '<th>Leader slots</th><th>Finalized</th><th>Empty</th>';
-            html += '<th>Unknown</th><th>Fin%</th></tr>';
+            html += '<th>Skipped</th><th>Unknown</th><th>Fin%</th></tr>';
             for (const v of validators) {
-                const known = v.finalized + v.empty;
-                const pct = known > 0 ? (v.finalized / known * 100) : -1;
+                const known = v.finalized + v.empty + v.skipped;
+                const pct = known > 0 ? ((v.finalized + v.empty) / known * 100) : -1;
                 const pctStr = pct >= 0 ? pct.toFixed(1) + '%' : 'n/a';
                 const cls = pct >= 0 ? pctClass(pct) : '';
                 const adnl = v.adnl ? v.adnl.substring(0, 16) + '...' : '';
@@ -499,6 +522,7 @@ _HTML_TEMPLATE = """
                 html += '<td>' + v.total_leader_slots + '</td>';
                 html += '<td>' + v.finalized + '</td>';
                 html += '<td>' + v.empty + '</td>';
+                html += '<td>' + v.skipped + '</td>';
                 html += '<td>' + v.unknown + '</td>';
                 html += '<td class="' + cls + '">' + pctStr + '</td>';
                 html += '</tr>';
@@ -593,6 +617,9 @@ def _main() -> None:
         "--text", action="store_true", help="Print text output instead of starting web server"
     )
     _ = ap.add_argument(
+        "--verbose", action="store_true", help="Print per-slot debug info"
+    )
+    _ = ap.add_argument(
         "--time-from", type=float, help="Filter groups starting after this unix timestamp"
     )
     _ = ap.add_argument(
@@ -611,6 +638,7 @@ def _main() -> None:
     show_validator_set_bin: str = raw.show_validator_set_bin  # pyright: ignore[reportAny]
     validator_names_json: str = raw.validator_names_json  # pyright: ignore[reportAny]
     text: bool = raw.text  # pyright: ignore[reportAny]
+    verbose: bool = raw.verbose  # pyright: ignore[reportAny]
     time_from: float | None = raw.time_from  # pyright: ignore[reportAny]
     time_until: float | None = raw.time_until  # pyright: ignore[reportAny]
 
@@ -634,7 +662,7 @@ def _main() -> None:
         file_index.install_callback(cached_parser)
 
         with file_index:
-            analyzer = LeaderStatsAnalyzer(cached_parser, vset_provider)
+            analyzer = LeaderStatsAnalyzer(cached_parser, vset_provider, verbose)
             if text:
                 _print_text(analyzer, time_from, time_until)
             else:
@@ -652,7 +680,7 @@ def _main() -> None:
                 log_paths.append(p)
 
         group_parser = ParserSessionStats(log_paths, hostname_regex)
-        analyzer = LeaderStatsAnalyzer(group_parser, vset_provider)
+        analyzer = LeaderStatsAnalyzer(group_parser, vset_provider, verbose)
         if text:
             _print_text(analyzer, time_from, time_until)
         else:
@@ -676,14 +704,14 @@ def _print_text(
         agg = analyzer.aggregate_by_validator(all_stats)
         print("=== Aggregate across all groups ===")
         print(
-            f"  {'Key':>20} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Unknown':>8} {'Fin%':>6}"
+            f"  {'Key':>20} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Fin%':>6}"
         )
         for key, v in sorted(agg.items(), key=lambda kv: -(kv[1].finalized)):
-            known = v.finalized + v.empty
-            pct = f"{v.finalized / known * 100:.1f}" if known > 0 else "n/a"
+            known = v.finalized + v.empty + v.skipped
+            pct = f"{(v.finalized + v.empty) / known * 100:.1f}" if known > 0 else "n/a"
             display_key = (v.name or key)[:20]
             print(
-                f"  {display_key:>20} {v.name[:12]:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.unknown:>8} {pct:>6}"
+                f"  {display_key:>20} {v.name[:12]:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
             )
 
 
