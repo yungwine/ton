@@ -558,6 +558,7 @@ version = "0.1.0"
 source = { editable = "test/tontester" }
 dependencies = [
     { name = "dash" },
+    { name = "flask" },
     { name = "plotly" },
     { name = "pytoniq-core" },
     { name = "requests" },
@@ -567,6 +568,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dash" },
+    { name = "flask" },
     { name = "plotly" },
     { name = "pytoniq-core" },
     { name = "requests" },
