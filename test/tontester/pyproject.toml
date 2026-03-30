@@ -7,7 +7,9 @@ dependencies = [
     "plotly",
     "pytoniq-core",
     "watchfiles>=1.1.1",
+    "flask",
 ]
 
 [project.scripts]
 consensus_explorer = "consensus_explorer.explorer:_main"
+leader_stats = "consensus_explorer.leader_stats:_main"

@@ -632,6 +632,7 @@ version = "0.1.0"
 source = { editable = "test/tontester" }
 dependencies = [
     { name = "dash" },
+    { name = "flask" },
     { name = "plotly" },
     { name = "pytoniq-core" },
     { name = "watchfiles" },
@@ -640,6 +641,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dash" },
+    { name = "flask" },
     { name = "plotly" },
     { name = "pytoniq-core" },
     { name = "watchfiles", specifier = ">=1.1.1" },
