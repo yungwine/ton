@@ -165,22 +165,27 @@ class LeaderStatsAnalyzer:
                 results.append(stats)
         return results
 
+    @staticmethod
     def aggregate_by_validator(
-        self,
         group_stats_list: list[GroupLeaderStats],
     ) -> dict[str, ValidatorLeaderStats]:
-        """Aggregate stats across groups, keyed by ADNL (or validator idx if no ADNL)."""
+        """Aggregate stats across groups, keyed by ADNL.
+
+        Validators without ADNL info are skipped since their idx is
+        group-local and cannot be matched across groups.
+        """
         agg: dict[str, ValidatorLeaderStats] = {}
         for gs in group_stats_list:
             for vs in gs.validators:
-                key = vs.adnl if vs.adnl else f"idx:{vs.validator_idx}@{gs.valgroup_id}"
-                if key not in agg:
-                    agg[key] = ValidatorLeaderStats(
-                        validator_idx=vs.validator_idx,
+                if not vs.adnl:
+                    continue
+                if vs.adnl not in agg:
+                    agg[vs.adnl] = ValidatorLeaderStats(
+                        validator_idx=-1,
                         adnl=vs.adnl,
                         name=vs.name,
                     )
-                a = agg[key]
+                a = agg[vs.adnl]
                 a.total_leader_slots += vs.total_leader_slots
                 a.finalized += vs.finalized
                 a.empty += vs.empty
@@ -352,7 +357,7 @@ def format_group_stats(stats: GroupLeaderStats) -> str:
         f"  Observed slots: {stats.observed_slot_range[0]} - {stats.observed_slot_range[1]}",
         f"  Total validators: {stats.total_validators}, leader window: {stats.slots_per_leader_window}",
         "",
-        f"  {'Idx':>4} {'ADNL':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Fin%':>6}",
+        f"  {'Idx':>4} {'ADNL':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}",
         f"  {'-' * 4} {'-' * 16} {'-' * 12} {'-' * 7} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 8} {'-' * 6}",
     ]
     for v in stats.validators:
@@ -484,14 +489,14 @@ _HTML_TEMPLATE = """
                         + g.observed_slot_range[1];
                 html += ', validators: ' + g.total_validators;
                 html += ', leader window: ' + g.slots_per_leader_window + '</p>';
-                html += renderTable(g.validators);
+                html += renderTable(g.validators, true);
             }
             el.innerHTML = html;
         }
 
         function renderAggregate(data, el) {
             if (!data.aggregate || Object.keys(data.aggregate).length === 0) {
-                el.innerHTML = '<p>No aggregate data.</p>';
+                el.innerHTML = '<p>No aggregate data. Aggregation requires ADNL resolution (--block-explorer-url and --show-validator-set-bin).</p>';
                 return;
             }
             const vals = Object.values(data.aggregate);
@@ -502,13 +507,16 @@ _HTML_TEMPLATE = """
                 const pb = kb > 0 ? (b.finalized + b.empty) / kb : 0;
                 return pb - pa;
             });
-            el.innerHTML = '<h3>Aggregate across all groups</h3>' + renderTable(vals);
+            el.innerHTML = '<h3>Aggregate across all groups</h3>' + renderTable(vals, false);
         }
 
-        function renderTable(validators) {
-            let html = '<table><tr><th>Idx</th><th>ADNL</th><th>Name</th>';
+        function renderTable(validators, showIdx) {
+            let html = '<table><tr>';
+            if (showIdx) html += '<th>Idx</th>';
+            html += '<th>ADNL</th><th>Name</th>';
             html += '<th>Leader slots</th><th>Finalized</th><th>Empty</th>';
-            html += '<th>Skipped</th><th>Unknown</th><th>Fin%</th></tr>';
+            html += '<th>Skipped</th><th>Unknown</th>';
+            html += '<th title="(finalized + empty) / (finalized + empty + skipped)">Produced%</th></tr>';
             for (const v of validators) {
                 const known = v.finalized + v.empty + v.skipped;
                 const pct = known > 0 ? ((v.finalized + v.empty) / known * 100) : -1;
@@ -516,7 +524,7 @@ _HTML_TEMPLATE = """
                 const cls = pct >= 0 ? pctClass(pct) : '';
                 const adnl = v.adnl ? v.adnl.substring(0, 16) + '...' : '';
                 html += '<tr>';
-                html += '<td>' + v.validator_idx + '</td>';
+                if (showIdx) html += '<td>' + v.validator_idx + '</td>';
                 html += '<td>' + adnl + '</td>';
                 html += '<td>' + (v.name || '') + '</td>';
                 html += '<td>' + v.total_leader_slots + '</td>';
@@ -711,12 +719,12 @@ def _print_text(
         agg = analyzer.aggregate_by_validator(all_stats)
         print("=== Aggregate across all groups ===")
         print(
-            f"  {'Key':>20} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Fin%':>6}"
+            f"  {'ADNL':>20} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}"
         )
         for key, v in sorted(agg.items(), key=lambda kv: -(kv[1].finalized)):
             known = v.finalized + v.empty + v.skipped
             pct = f"{(v.finalized + v.empty) / known * 100:.1f}" if known > 0 else "n/a"
-            display_key = (v.name or key)[:20]
+            display_key = (v.name or v.adnl[:20]) if v.adnl else key[:20]
             print(
                 f"  {display_key:>20} {v.name[:12]:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
             )
