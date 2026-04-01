@@ -105,7 +105,9 @@ def _main():
 
         cache_dir = cast(str, args.cache_dir)
         vset_provider = ValidatorSetInfoProvider(
-            block_explorer_url, show_validator_set_bin, validator_names_json,
+            block_explorer_url,
+            show_validator_set_bin,
+            validator_names_json,
             cache_dir=cache_dir or None,
         )
 

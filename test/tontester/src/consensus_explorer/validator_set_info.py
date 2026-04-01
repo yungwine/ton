@@ -58,7 +58,7 @@ class ValidatorSetInfoProvider:
         try:
             raw_json = names_path.read_text(encoding="utf-8")
             parsed = cast(dict[str, str], json.loads(raw_json))
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return {}
 
         return parsed
@@ -131,7 +131,7 @@ class ValidatorSetInfoProvider:
         if values:
             try:
                 return int(values[0])
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 pass
 
         match = re.search(r"(?:^|[?&])seqno=(\d+)", href)
@@ -230,7 +230,9 @@ class ValidatorSetInfoProvider:
             key_block_path = self._cache_dir / f"key_block_{key_block_seqno}.boc"
             _ = key_block_path.write_bytes(block_data)
         else:
-            key_block_path = Path(tempfile.mkdtemp(prefix="validator_set_")) / f"key_block_{key_block_seqno}.boc"
+            key_block_path = (
+                Path(tempfile.mkdtemp(prefix="validator_set_")) / f"key_block_{key_block_seqno}.boc"
+            )
             _ = key_block_path.write_bytes(block_data)
 
         output = self._run_show_validator_set(
@@ -315,8 +317,12 @@ class ValidatorSetInfoProvider:
             raise RuntimeError("key block roothash/filehash were not found")
 
         validator_set_output = self._get_validator_set_output(
-            key_block_seqno, root_hash, file_hash,
-            group_workchain, group_shard_hex, cc_seqno,
+            key_block_seqno,
+            root_hash,
+            file_hash,
+            group_workchain,
+            group_shard_hex,
+            cc_seqno,
         )
         validator_set_table = self._build_table(validator_set_output)
 

@@ -100,7 +100,9 @@ class LeaderStatsAnalyzer:
         finalized_history = _walk_finalized_chains(directly_finalized, group_slots)
 
         if self._verbose:
-            print(f"  Group {valgroup_name}: directly finalized slots = {sorted(directly_finalized)}")
+            print(
+                f"  Group {valgroup_name}: directly finalized slots = {sorted(directly_finalized)}"
+            )
             for s in range(min_slot, max_slot + 1):
                 status = finalized_history.get(s)
                 if status is not None:
@@ -132,9 +134,7 @@ class LeaderStatsAnalyzer:
         # Enrich with ADNL info if available
         if self._vset_provider and isinstance(group_info, GroupInfo):
             try:
-                vset_text = self._vset_provider.get_validator_set_text(
-                    valgroup_name, data.slots
-                )
+                vset_text = self._vset_provider.get_validator_set_text(valgroup_name, data.slots)
                 adnl_map = _parse_vset_text(vset_text)
                 for idx, (adnl, name) in adnl_map.items():
                     if idx in stats_by_validator:
@@ -263,9 +263,7 @@ def _infer_group_params(
 ) -> tuple[int | None, int | None]:
     """Infer (total_validators, slots_per_leader_window) from collator assignments."""
     pairs = [
-        (s, sd.collator)
-        for s, sd in sorted(group_slots.items())
-        if isinstance(sd.collator, int)
+        (s, sd.collator) for s, sd in sorted(group_slots.items()) if isinstance(sd.collator, int)
     ]
     if len(pairs) < 2:
         return None, None
@@ -312,7 +310,7 @@ def _parse_vset_text(text: str) -> dict[int, tuple[str, str]]:
                 name = parts[2].strip()
                 if len(adnl) == 64:
                     result[idx] = (adnl, name)
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 continue
     return result
 
@@ -330,7 +328,9 @@ def _serialize_validator(v: ValidatorLeaderStats) -> dict[str, str | int]:
     }
 
 
-def _serialize_group(gs: GroupLeaderStats) -> dict[str, str | float | int | list[int] | list[dict[str, str | int]]]:
+def _serialize_group(
+    gs: GroupLeaderStats,
+) -> dict[str, str | float | int | list[int] | list[dict[str, str | int]]]:
     return {
         "valgroup_id": gs.valgroup_id,
         "group_start_est": gs.group_start_est,
@@ -343,7 +343,11 @@ def _serialize_group(gs: GroupLeaderStats) -> dict[str, str | float | int | list
 
 def _serialize_response(
     all_stats: list[GroupLeaderStats], analyzer: LeaderStatsAnalyzer
-) -> dict[str, list[dict[str, str | float | int | list[int] | list[dict[str, str | int]]]] | dict[str, dict[str, str | int]]]:
+) -> dict[
+    str,
+    list[dict[str, str | float | int | list[int] | list[dict[str, str | int]]]]
+    | dict[str, dict[str, str | int]],
+]:
     agg = analyzer.aggregate_by_validator(all_stats)
     return {
         "groups": [_serialize_group(gs) for gs in all_stats],
@@ -600,12 +604,8 @@ def _main() -> None:
         default=r"^(.*)$",
         help="Regex with capture group to extract hostname from filename",
     )
-    _ = ap.add_argument(
-        "--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)"
-    )
-    _ = ap.add_argument(
-        "--port", type=int, default=8051, help="Port to bind to (default: 8051)"
-    )
+    _ = ap.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    _ = ap.add_argument("--port", type=int, default=8051, help="Port to bind to (default: 8051)")
     _ = ap.add_argument(
         "--block-explorer-url",
         default=os.getenv("CONSENSUS_EXPLORER_URL", ""),
@@ -629,9 +629,7 @@ def _main() -> None:
     _ = ap.add_argument(
         "--text", action="store_true", help="Print text output instead of starting web server"
     )
-    _ = ap.add_argument(
-        "--verbose", action="store_true", help="Print per-slot debug info"
-    )
+    _ = ap.add_argument("--verbose", action="store_true", help="Print per-slot debug info")
     _ = ap.add_argument(
         "--time-from", type=float, help="Filter groups starting after this unix timestamp"
     )
@@ -661,7 +659,9 @@ def _main() -> None:
         if not Path(show_validator_set_bin).exists():
             ap.error(f"show-validator-set binary not found at {show_validator_set_bin}")
         vset_provider = ValidatorSetInfoProvider(
-            block_explorer_url, show_validator_set_bin, validator_names_json,
+            block_explorer_url,
+            show_validator_set_bin,
+            validator_names_json,
             cache_dir=cache_dir or None,
         )
 
