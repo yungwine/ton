@@ -23,6 +23,7 @@ class SlotStatus(enum.Enum):
 class ValidatorLeaderStats:
     validator_idx: int
     adnl: str = ""
+    pub_key_hash: str = ""
     name: str = ""
     total_leader_slots: int = 0
     finalized: int = 0
@@ -136,9 +137,10 @@ class LeaderStatsAnalyzer:
             try:
                 vset_text = self._vset_provider.get_validator_set_text(valgroup_name, data.slots)
                 adnl_map = _parse_vset_text(vset_text)
-                for idx, (adnl, name) in adnl_map.items():
+                for idx, (adnl, pub_key_hash, name) in adnl_map.items():
                     if idx in stats_by_validator:
                         stats_by_validator[idx].adnl = adnl
+                        stats_by_validator[idx].pub_key_hash = pub_key_hash
                         stats_by_validator[idx].name = name
             except Exception:
                 pass
@@ -183,6 +185,7 @@ class LeaderStatsAnalyzer:
                     agg[vs.adnl] = ValidatorLeaderStats(
                         validator_idx=-1,
                         adnl=vs.adnl,
+                        pub_key_hash=vs.pub_key_hash,
                         name=vs.name,
                     )
                 a = agg[vs.adnl]
@@ -193,6 +196,8 @@ class LeaderStatsAnalyzer:
                 a.unknown += vs.unknown
                 if vs.name and not a.name:
                     a.name = vs.name
+                if vs.pub_key_hash and not a.pub_key_hash:
+                    a.pub_key_hash = vs.pub_key_hash
         return agg
 
 
@@ -298,19 +303,20 @@ def _infer_group_params(
     return num_validators, leader_window
 
 
-def _parse_vset_text(text: str) -> dict[int, tuple[str, str]]:
-    """Parse validator set text output to get idx -> (adnl, name)."""
-    result: dict[int, tuple[str, str]] = {}
+def _parse_vset_text(text: str) -> dict[int, tuple[str, str, str]]:
+    """Parse validator set text output to get idx -> (adnl, pub_key_hash, name)."""
+    result: dict[int, tuple[str, str, str]] = {}
     for line in text.splitlines():
         parts = line.split("|")
-        if len(parts) >= 3:
+        if len(parts) >= 4:
             try:
                 idx = int(parts[0].strip())
                 adnl = parts[1].strip()
-                name = parts[2].strip()
+                pub_key_hash = parts[2].strip()
+                name = parts[3].strip()
                 if len(adnl) == 64:
-                    result[idx] = (adnl, name)
-            except ValueError, IndexError:
+                    result[idx] = (adnl, pub_key_hash, name)
+            except (ValueError, IndexError):
                 continue
     return result
 
@@ -319,6 +325,7 @@ def _serialize_validator(v: ValidatorLeaderStats) -> dict[str, str | int]:
     return {
         "validator_idx": v.validator_idx,
         "adnl": v.adnl,
+        "pub_key_hash": v.pub_key_hash,
         "name": v.name,
         "total_leader_slots": v.total_leader_slots,
         "finalized": v.finalized,
@@ -361,16 +368,17 @@ def format_group_stats(stats: GroupLeaderStats) -> str:
         f"  Observed slots: {stats.observed_slot_range[0]} - {stats.observed_slot_range[1]}",
         f"  Total validators: {stats.total_validators}, leader window: {stats.slots_per_leader_window}",
         "",
-        f"  {'Idx':>4} {'ADNL':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}",
-        f"  {'-' * 4} {'-' * 16} {'-' * 12} {'-' * 7} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 8} {'-' * 6}",
+        f"  {'Idx':>4} {'ADNL':>16} {'PubKeyHash':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}",
+        f"  {'-' * 4} {'-' * 16} {'-' * 16} {'-' * 12} {'-' * 7} {'-' * 10} {'-' * 6} {'-' * 8} {'-' * 8} {'-' * 6}",
     ]
     for v in stats.validators:
         known = v.finalized + v.empty + v.skipped
         pct = f"{(v.finalized + v.empty) / known * 100:.1f}" if known > 0 else "n/a"
         adnl_short = v.adnl[:16] if v.adnl else ""
+        pkh_short = v.pub_key_hash[:16] if v.pub_key_hash else ""
         name = v.name[:12] if v.name else ""
         lines.append(
-            f"  {v.validator_idx:>4} {adnl_short:>16} {name:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
+            f"  {v.validator_idx:>4} {adnl_short:>16} {pkh_short:>16} {name:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
         )
     return "\n".join(lines)
 
@@ -526,7 +534,7 @@ _HTML_TEMPLATE = """
         function renderTable(validators, showIdx) {
             let html = '<table><tr>';
             if (showIdx) html += '<th>Idx</th>';
-            html += '<th>ADNL</th><th>Name</th>';
+            html += '<th>ADNL</th><th>PubKeyHash</th><th>Name</th>';
             html += '<th>Leader slots</th><th>Finalized</th><th>Empty</th>';
             html += '<th>Skipped</th><th>Unknown</th>';
             html += '<th title="(finalized + empty) / (finalized + empty + skipped)">Produced%</th></tr>';
@@ -536,9 +544,11 @@ _HTML_TEMPLATE = """
                 const pctStr = pct >= 0 ? pct.toFixed(1) + '%' : 'n/a';
                 const cls = pct >= 0 ? pctClass(pct) : '';
                 const adnl = v.adnl ? v.adnl.substring(0, 16) + '...' : '';
+                const pkh = v.pub_key_hash || '';
                 html += '<tr>';
                 if (showIdx) html += '<td>' + v.validator_idx + '</td>';
                 html += '<td>' + adnl + '</td>';
+                html += '<td>' + pkh + '</td>';
                 html += '<td>' + (v.name || '') + '</td>';
                 html += '<td>' + v.total_leader_slots + '</td>';
                 html += '<td>' + v.finalized + '</td>';
@@ -728,14 +738,15 @@ def _print_text(
         agg = analyzer.aggregate_by_validator(all_stats)
         print("=== Aggregate across all groups ===")
         print(
-            f"  {'ADNL':>20} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}"
+            f"  {'ADNL':>20} {'PubKeyHash':>16} {'Name':>12} {'Leader':>7} {'Finalized':>10} {'Empty':>6} {'Skipped':>8} {'Unknown':>8} {'Prod%':>6}"
         )
         for key, v in sorted(agg.items(), key=lambda kv: -(kv[1].finalized)):
             known = v.finalized + v.empty + v.skipped
             pct = f"{(v.finalized + v.empty) / known * 100:.1f}" if known > 0 else "n/a"
             display_key = (v.name or v.adnl[:20]) if v.adnl else key[:20]
+            pkh_short = v.pub_key_hash[:16] if v.pub_key_hash else ""
             print(
-                f"  {display_key:>20} {v.name[:12]:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
+                f"  {display_key:>20} {pkh_short:>16} {v.name[:12]:>12} {v.total_leader_slots:>7} {v.finalized:>10} {v.empty:>6} {v.skipped:>8} {v.unknown:>8} {pct:>6}"
             )
 
 
