@@ -85,6 +85,13 @@ td::Result<td::Slice> Tokenizer::peek_raw_token() {
   return r;
 }
 
+td::Slice Tokenizer::get_remaining() {
+  skipspc();
+  auto r = remaining_;
+  remaining_ = td::Slice();
+  return r;
+}
+
 void Query::start_up() {
   auto R = [&]() -> td::Status {
     TRY_STATUS(run());
@@ -2128,5 +2135,32 @@ td::Status GetConsensusNoncriticalParamsOverridesQuery::receive(td::BufferSlice 
                     ton::fetch_tl_object<ton::ton_api::consensus_noncriticalParamsOverrideList>(data.as_slice(), true),
                     "received incorrect answer: ");
   td::TerminalIO::out() << td::json_encode<std::string>(td::ToJson(*result), true) << "\n";
+  return td::Status::OK();
+}
+
+td::Status JsonQuery::run() {
+  json_str_ = tokenizer_.get_remaining().str();
+  if (json_str_.empty()) {
+    return td::Status::Error("expected JSON query");
+  }
+  return td::Status::OK();
+}
+
+td::Status JsonQuery::send() {
+  TRY_RESULT(json, td::json_decode(json_str_));
+  if (json.type() != td::JsonValue::Type::Object) {
+    return td::Status::Error("Query must be a JSON object");
+  }
+  ton::tl_object_ptr<ton::ton_api::Function> func;
+  TRY_STATUS(from_json(func, std::move(json)));
+  auto b = ton::serialize_tl_object(func, true);
+  td::actor::send_closure(console_, &ValidatorEngineConsole::envelope_send_query, std::move(b), create_promise());
+  return td::Status::OK();
+}
+
+td::Status JsonQuery::receive(td::BufferSlice data) {
+  TRY_RESULT_PREFIX(f, ton::fetch_tl_object<ton::ton_api::Object>(data.as_slice(), true),
+                    "received incorrect answer: ");
+  td::TerminalIO::out() << td::json_encode<std::string>(td::ToJson(*f), true) << "\n";
   return td::Status::OK();
 }

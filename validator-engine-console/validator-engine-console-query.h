@@ -55,6 +55,7 @@ class Tokenizer {
 
   td::Result<td::Slice> get_raw_token();
   td::Result<td::Slice> peek_raw_token();
+  td::Slice get_remaining();
 
   template <typename T>
   inline td::Result<T> get_token() {
@@ -1918,4 +1919,26 @@ class GetConsensusNoncriticalParamsOverridesQuery : public Query {
   std::string name() const override {
     return get_name();
   }
+};
+
+class JsonQuery : public Query {
+ public:
+  JsonQuery(td::actor::ActorId<ValidatorEngineConsole> console, Tokenizer tokenizer)
+      : Query(console, std::move(tokenizer)) {
+  }
+  td::Status run() override;
+  td::Status send() override;
+  td::Status receive(td::BufferSlice data) override;
+  static std::string get_name() {
+    return "json-query";
+  }
+  static std::string get_help() {
+    return "json-query <json>\tsend a JSON-serialized TL query and print JSON-deserialized TL response";
+  }
+  std::string name() const override {
+    return get_name();
+  }
+
+ private:
+  std::string json_str_;
 };
