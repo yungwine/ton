@@ -413,6 +413,8 @@ _HTML_TEMPLATE = """
         <label>Group: <input type="text" id="group-filter"
                placeholder="valgroup id (optional)"></label>
         <button onclick="loadStats()">Load</button>
+        <button onclick="loadLastMinutes(10)">Last 10 min</button>
+        <button onclick="loadLastMinutes(20)">Last 20 min</button>
     </div>
 
     <div class="tab-bar">
@@ -434,6 +436,13 @@ _HTML_TEMPLATE = """
             document.getElementById('tab-aggregate').className =
                 tab === 'aggregate' ? 'active' : '';
             if (lastData) renderData(lastData);
+        }
+
+        function loadLastMinutes(minutes) {
+            const now = Math.floor(Date.now() / 1000);
+            document.getElementById('time-from').value = now - minutes * 60;
+            document.getElementById('time-until').value = '';
+            loadStats();
         }
 
         async function loadStats() {
