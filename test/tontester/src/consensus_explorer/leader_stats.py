@@ -435,6 +435,7 @@ _HTML_TEMPLATE = """
     </div>
 
     <script>
+        const WEB_ROOT = '{{ web_root }}';
         let currentTab = 'groups';
         let lastData = null;
 
@@ -462,12 +463,12 @@ _HTML_TEMPLATE = """
 
             let url;
             if (groupFilter) {
-                url = '/api/group/' + encodeURIComponent(groupFilter);
+                url = WEB_ROOT + 'api/group/' + encodeURIComponent(groupFilter);
             } else {
                 const params = new URLSearchParams();
                 if (timeFrom) params.set('time_from', timeFrom);
                 if (timeUntil) params.set('time_until', timeUntil);
-                url = '/api/stats?' + params.toString();
+                url = WEB_ROOT + 'api/stats?' + params.toString();
             }
 
             try {
@@ -567,13 +568,18 @@ _HTML_TEMPLATE = """
 """
 
 
-def _build_web_app(analyzer: LeaderStatsAnalyzer, host: str, port: int) -> None:
+def _build_web_app(analyzer: LeaderStatsAnalyzer, host: str, port: int, web_root: str) -> None:
     from flask import Flask, Response, jsonify, render_template_string, request
+
+    # Normalize web_root: ensure it starts and ends with /
+    web_root = "/" + web_root.strip("/")
+    if not web_root.endswith("/"):
+        web_root += "/"
 
     app = Flask(__name__)
 
     def index() -> str:
-        return render_template_string(_HTML_TEMPLATE)
+        return render_template_string(_HTML_TEMPLATE, web_root=web_root)
 
     def api_groups() -> Response:
         time_from = request.args.get("time_from", type=float)
@@ -601,12 +607,14 @@ def _build_web_app(analyzer: LeaderStatsAnalyzer, host: str, port: int) -> None:
         all_stats = analyzer.analyze_time_range(time_from, time_until)
         return jsonify(_serialize_response(all_stats, analyzer))
 
-    app.add_url_rule("/", endpoint="index", view_func=index)
-    app.add_url_rule("/api/groups", endpoint="api_groups", view_func=api_groups)
-    app.add_url_rule("/api/group/<path:valgroup_name>", endpoint="api_group", view_func=api_group)
-    app.add_url_rule("/api/stats", endpoint="api_stats", view_func=api_stats)
+    app.add_url_rule(web_root, endpoint="index", view_func=index)
+    app.add_url_rule(f"{web_root}api/groups", endpoint="api_groups", view_func=api_groups)
+    app.add_url_rule(
+        f"{web_root}api/group/<path:valgroup_name>", endpoint="api_group", view_func=api_group
+    )
+    app.add_url_rule(f"{web_root}api/stats", endpoint="api_stats", view_func=api_stats)
 
-    print(f"Leader stats server running at http://{host}:{port}")
+    print(f"Leader stats server running at http://{host}:{port}{web_root}")
     app.run(host=host, port=port, debug=False)
 
 
@@ -645,6 +653,7 @@ def _main() -> None:
         default=os.getenv("CONSENSUS_EXPLORER_CACHE_DIR", ""),
         help="Directory to cache downloaded key blocks",
     )
+    _ = ap.add_argument("--web-root", default="/", help="Web root prefix (default: /)")
     _ = ap.add_argument(
         "--text", action="store_true", help="Print text output instead of starting web server"
     )
@@ -668,6 +677,7 @@ def _main() -> None:
     show_validator_set_bin: str = raw.show_validator_set_bin  # pyright: ignore[reportAny]
     validator_names_json: str = raw.validator_names_json  # pyright: ignore[reportAny]
     cache_dir: str = raw.cache_dir  # pyright: ignore[reportAny]
+    web_root: str = raw.web_root  # pyright: ignore[reportAny]
     text: bool = raw.text  # pyright: ignore[reportAny]
     verbose: bool = raw.verbose  # pyright: ignore[reportAny]
     time_from: float | None = raw.time_from  # pyright: ignore[reportAny]
@@ -700,7 +710,7 @@ def _main() -> None:
             if text:
                 _print_text(analyzer, time_from, time_until)
             else:
-                _build_web_app(analyzer, host, port)
+                _build_web_app(analyzer, host, port, web_root)
     else:
         from .parser.parser_session_stats import ParserSessionStats
 
@@ -718,7 +728,7 @@ def _main() -> None:
         if text:
             _print_text(analyzer, time_from, time_until)
         else:
-            _build_web_app(analyzer, host, port)
+            _build_web_app(analyzer, host, port, web_root)
 
 
 def _print_text(

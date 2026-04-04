@@ -8,6 +8,7 @@ dependencies = [
     "pytoniq-core",
     "watchfiles>=1.1.1",
     "flask",
+    "requests",
 ]
 
 [project.scripts]
