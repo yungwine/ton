@@ -655,6 +655,11 @@ def _main() -> None:
     )
     _ = ap.add_argument("--web-root", default="/", help="Web root prefix (default: /)")
     _ = ap.add_argument(
+        "--sudo-helper",
+        default="",
+        help="Path to helper script for reading files via sudo on permission denied",
+    )
+    _ = ap.add_argument(
         "--text", action="store_true", help="Print text output instead of starting web server"
     )
     _ = ap.add_argument("--verbose", action="store_true", help="Print per-slot debug info")
@@ -678,6 +683,7 @@ def _main() -> None:
     validator_names_json: str = raw.validator_names_json  # pyright: ignore[reportAny]
     cache_dir: str = raw.cache_dir  # pyright: ignore[reportAny]
     web_root: str = raw.web_root  # pyright: ignore[reportAny]
+    sudo_helper: str = raw.sudo_helper  # pyright: ignore[reportAny]
     text: bool = raw.text  # pyright: ignore[reportAny]
     verbose: bool = raw.verbose  # pyright: ignore[reportAny]
     time_from: float | None = raw.time_from  # pyright: ignore[reportAny]
@@ -701,8 +707,10 @@ def _main() -> None:
         stats_dir = Path(stats_dir_str)
         db_path = Path(db_str) if db_str else stats_dir / "index.db"
 
-        file_index = FileIndex(stats_dir, db_path)
-        cached_parser = CachedGroupParser(file_index, hostname_regex)
+        file_index = FileIndex(stats_dir, db_path, sudo_helper=sudo_helper or None)
+        cached_parser = CachedGroupParser(
+            file_index, hostname_regex, sudo_helper=sudo_helper or None
+        )
         file_index.install_callback(cached_parser)
 
         with file_index:
