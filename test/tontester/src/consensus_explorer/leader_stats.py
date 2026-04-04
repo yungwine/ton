@@ -458,6 +458,9 @@ _HTML_TEMPLATE = """
             const timeFrom = document.getElementById('time-from').value;
             const timeUntil = document.getElementById('time-until').value;
             const groupFilter = document.getElementById('group-filter').value;
+            if (!timeFrom && !timeUntil && !groupFilter) {
+                return;
+            }
             const results = document.getElementById('results');
             results.innerHTML = '<p>Loading...</p>';
 
