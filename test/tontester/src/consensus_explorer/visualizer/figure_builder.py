@@ -280,7 +280,11 @@ class DetailFigureBuilder:
     def _event_hover_text(self, label: str, validator: int | str | None) -> str:
         if label == "collation" and self._slot.time_stats:
             return self._format_time_stats(self._slot.time_stats)
-        if label == "block_validation" and self._slot.validation_time_stats and validator is not None:
+        if (
+            label == "block_validation"
+            and self._slot.validation_time_stats
+            and validator is not None
+        ):
             v_ts = self._slot.validation_time_stats.get(validator)
             if v_ts:
                 return self._format_time_stats(v_ts)

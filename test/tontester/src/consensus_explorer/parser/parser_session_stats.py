@@ -77,7 +77,7 @@ def format_block_id(id_: TonNode_blockIdExt):
 
 
 def _parse_time_stats(time_stats: str) -> list[tuple[str, float]]:
-    pattern = r'\{(.+?):\d+\.\d+->\d+\.\d+\((\d+\.\d+)\)\}'
+    pattern = r"\{(.+?):\d+\.\d+->\d+\.\d+\((\d+\.\d+)\)\}"
     return [(m.group(1), float(m.group(2))) for m in re.finditer(pattern, time_stats)]
 
 
@@ -573,9 +573,7 @@ class ParserSessionStats(GroupParser):
         merged: dict[str, dict[bytes, list[Consensus_stats_timestampedEvent]]] = {}
         all_time_stats: dict[str, list[tuple[str, float]]] = {}
         # hostname -> { (block_id_str, workchain, shard): time_stats }
-        host_validation_ts: dict[
-            str, dict[tuple[str, int, int], list[tuple[str, float]]]
-        ] = {}
+        host_validation_ts: dict[str, dict[tuple[str, int, int], list[tuple[str, float]]]] = {}
 
         for log_file in self._logs_path:
             hostname = self._extract_hostname(log_file)
@@ -583,9 +581,7 @@ class ParserSessionStats(GroupParser):
                 with open_stats_file(log_file) as f:
                     events_by_groups: dict[bytes, list[Consensus_stats_timestampedEvent]] = {}
                     time_stats_by_block: dict[str, list[tuple[str, float]]] = {}
-                    validation_ts_raw: dict[
-                        tuple[str, int, int], list[tuple[str, float]]
-                    ] = {}
+                    validation_ts_raw: dict[tuple[str, int, int], list[tuple[str, float]]] = {}
                     start_line = 0
                     if self.with_cache and log_file in self._cache_lines:
                         start_line = self._cache_lines[log_file]
@@ -614,12 +610,8 @@ class ParserSessionStats(GroupParser):
                                             ("cpu_work_time", collated.cpu_work_time),
                                         ]
                                         + _parse_time_stats(collated.time_stats)
-                                        + _parse_kv_stats(
-                                            collated.work_time_real_stats, "wt_real:"
-                                        )
-                                        + _parse_kv_stats(
-                                            collated.work_time_cpu_stats, "wt_cpu:"
-                                        )
+                                        + _parse_kv_stats(collated.work_time_real_stats, "wt_real:")
+                                        + _parse_kv_stats(collated.work_time_cpu_stats, "wt_cpu:")
                                     )
                             except Exception:
                                 pass
@@ -644,9 +636,7 @@ class ParserSessionStats(GroupParser):
                                         + _parse_kv_stats(
                                             validated.work_time_real_stats, "wt_real:"
                                         )
-                                        + _parse_kv_stats(
-                                            validated.work_time_cpu_stats, "wt_cpu:"
-                                        )
+                                        + _parse_kv_stats(validated.work_time_cpu_stats, "wt_cpu:")
                                     )
                             except Exception:
                                 pass
@@ -675,7 +665,7 @@ class ParserSessionStats(GroupParser):
                     host_groups = merged.setdefault(hostname, {})
                     for group_hash, group_events in events_by_groups.items():
                         host_groups.setdefault(group_hash, []).extend(group_events)
-            except (OSError, FileNotFoundError, gzip.BadGzipFile):
+            except OSError, FileNotFoundError, gzip.BadGzipFile:
                 logging.warning(f"Failed to read log file {log_file}", stack_info=True)
 
         groups: dict[bytes, GroupData] = {}
@@ -707,9 +697,7 @@ class ParserSessionStats(GroupParser):
             if slot_data.block_id_ext and slot_data.block_id_ext in all_time_stats:
                 slot_data.time_stats = all_time_stats[slot_data.block_id_ext]
             if slot_data.block_id_ext and slot_data.block_id_ext in all_validation_time_stats:
-                slot_data.validation_time_stats = all_validation_time_stats[
-                    slot_data.block_id_ext
-                ]
+                slot_data.validation_time_stats = all_validation_time_stats[slot_data.block_id_ext]
 
         result = ConsensusData(
             groups=list(groups.values()), slots=list(self._slots.values()), events=self._events

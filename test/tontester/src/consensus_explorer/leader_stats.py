@@ -316,7 +316,7 @@ def _parse_vset_text(text: str) -> dict[int, tuple[str, str, str]]:
                 name = parts[3].strip()
                 if len(adnl) == 64:
                     result[idx] = (adnl, pub_key_hash, name)
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 continue
     return result
 

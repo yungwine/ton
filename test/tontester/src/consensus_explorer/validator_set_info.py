@@ -201,7 +201,9 @@ class ValidatorSetInfoProvider:
 
         table_lines = ["idx | adnl | pub_key_hash | name"]
         for idx, pub_key_hash, adnl in rows:
-            table_lines.append(f"{idx} | {adnl} | {pub_key_hash} | {self._validator_names.get(adnl, '')}")
+            table_lines.append(
+                f"{idx} | {adnl} | {pub_key_hash} | {self._validator_names.get(adnl, '')}"
+            )
         return "\n".join(table_lines)
 
     def _get_validator_set_output(
