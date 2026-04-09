@@ -1,4 +1,3 @@
-import json
 import os
 from multiprocessing import Process
 from pathlib import Path
@@ -152,8 +151,7 @@ def _main():
             parser.error(f"tonlib library not found at {tonlib_lib_path}")
 
         with open(tonlib_config_path) as f:
-            config_data = json.load(f)
-        tonlib_config = ton_api.Liteclient_config_global.from_dict(config_data)
+            tonlib_config = ton_api.Liteclient_config_global.from_json(f.read())
         tonlib_cdll = TonlibCDLL(Path(tonlib_lib_path))
 
     def run_app(parser: GroupParser):

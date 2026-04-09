@@ -511,7 +511,7 @@ class FileIndex:
             shard: int | None
 
         class RangeRow(TypedDict):
-            seqno_start: int
+            seqno_start: int | None
             seqno_end: int
 
         class RefRow(TypedDict):
