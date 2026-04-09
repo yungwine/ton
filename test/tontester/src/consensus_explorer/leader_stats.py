@@ -72,7 +72,12 @@ class LeaderStatsAnalyzer:
         if not data.groups:
             return None
 
-        group_info = data.groups[0]
+        group_info = next(
+            (g for g in data.groups if g.valgroup_name == valgroup_name),
+            None,
+        )
+        if group_info is None:
+            return None
         group_slots = {s.slot: s for s in data.slots if s.valgroup_id == valgroup_name}
         group_events = [e for e in data.events if e.valgroup_id == valgroup_name]
 
