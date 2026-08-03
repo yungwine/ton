@@ -706,3 +706,77 @@ async def test_group_timeline_keeps_observer_host_on_events():
     assert by_label["skip_observed"] == "ton-nval-01n"
     assert by_label["block_accepted"] == "ton-nval-02n"
     assert by_label["notarize_vote"] == 1
+
+
+GROUP_C = GroupInfo(
+    valgroup_hash=b"c",
+    catchain_seqno=9,
+    workchain=0,
+    shard=0x8000000000000000,
+    group_start_est=3000.0,
+)
+
+
+def _late_start_data() -> ConsensusData:
+    """Observed slots start at 20, and slot 20's parent is genesis.
+
+    The chain walk then marks every slot below 20 skipped, even though none of
+    them was ever observed.
+    """
+    name = GROUP_C.valgroup_name
+    slots = [
+        _slot(name, s, s % 2, "genesis" if s == 20 else f"{{{s - 1}, x}}") for s in range(20, 28)
+    ]
+    events: list[EventData] = [
+        EventData(valgroup_id=name, slot=27, label="finalize_reached", kind="reached", t_ms=27000.0)
+    ]
+    events += [
+        EventData(
+            valgroup_id=name,
+            slot=s,
+            label="candidate_received",
+            kind="local",
+            t_ms=s * 1000.0,
+            validator=0,
+        )
+        for s in range(20, 28)
+    ]
+    return ConsensusData(groups=[GROUP_C], slots=slots, events=events)
+
+
+def _build_late_start() -> MCPServer:
+    parser = FakeParser([GROUP_C], {GROUP_C.valgroup_name: _late_start_data()})
+    return build_server(parser, LeaderStatsAnalyzer(parser))
+
+
+@pytest.mark.asyncio
+async def test_group_health_slot_lists_agree_with_the_counts():
+    health = _health(
+        await _build_late_start().call_tool(
+            "group_health", {"valgroup_name": GROUP_C.valgroup_name}
+        )
+    )
+
+    # Counts cover the observed range, so the lists must too, or a reader sees
+    # "0 skipped" beside a list of twenty skipped slots.
+    assert health.first_slot == 20
+    assert len(health.skipped_slots) == health.skipped
+    assert all(health.first_slot <= s <= health.last_slot for s in health.skipped_slots)
+
+
+@pytest.mark.asyncio
+async def test_slot_timings_percentiles_cover_the_range_not_just_the_returned_rows():
+    timings = _timings_out(
+        await _build_late_start().call_tool(
+            "slot_timings", {"valgroup_name": GROUP_C.valgroup_name, "limit": 3}
+        )
+    )
+
+    assert timings.slot_count == 8
+    assert len(timings.slots) == 3
+    assert timings.truncated is True
+    # Only slot 27 is measurable, and it falls outside the three returned rows.
+    # A truncated response must still summarise everything that was asked for.
+    assert [r.slot for r in timings.slots] == [20, 21, 22]
+    by_metric = {p.metric: p for p in timings.percentiles}
+    assert by_metric["candidate_to_finalize_ms"].count == 1

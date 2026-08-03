@@ -684,8 +684,9 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
           finalize quorum, i.e. the slot's end-to-end cost
 
         A null means the phase was not observed for that slot, which is normal
-        for skipped slots and for slots at the edge of log coverage.
-        Percentiles are nearest-rank over the non-null values in the range.
+        for skipped slots and for slots at the edge of log coverage. Percentiles
+        are nearest-rank over every non-null value in the range, including slots
+        past `limit` -- only the per-slot rows are capped.
         """
         v = view(valgroup_name)
         wanted = sorted(
@@ -695,7 +696,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         )
 
         rows: list[SlotTiming] = []
-        for s in wanted[:limit]:
+        for s in wanted:
             finalize_at = v.reached_ms(s, "finalize_reached")
             first_candidate = v.first_candidate_ms(s)
             rows.append(
@@ -728,7 +729,9 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         return SlotTimings(
             valgroup_id=valgroup_name,
             slot_count=len(wanted),
-            slots=rows,
+            # Percentiles stay over the whole range; only the rows are capped,
+            # so a truncated response still summarises what was asked for.
+            slots=rows[:limit],
             percentiles=percentiles,
             truncated=len(wanted) > limit,
         )
@@ -766,16 +769,22 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             else:
                 counts[status] += 1
 
-        finalized_slots = sorted(
-            s for s, status in v.status.items() if status == SlotStatus.FINALIZED
-        )
+        # The walk reaches back past the observed range -- a genesis parent marks
+        # every slot below it skipped -- so bound the lists the same way the
+        # counts are bounded, or they contradict each other.
+        def in_range(status: SlotStatus) -> list[int]:
+            return sorted(
+                s for s, st in v.status.items() if st == status and first_slot <= s <= last_slot
+            )
+
+        finalized_slots = in_range(SlotStatus.FINALIZED)
+        skipped_slots = in_range(SlotStatus.SKIPPED)
         empty_block_slots = sorted(
             s for s, sd in v.slots.items() if sd.block_id_ext == "empty" or sd.is_empty
         )
         skip_observed_slots = sorted(
             {e.slot for e in v.events if e.label == "skip_observed"} & set(v.slots)
         )
-        skipped_slots = sorted(s for s, status in v.status.items() if status == SlotStatus.SKIPPED)
 
         # Gap between consecutive finalized blocks, by when their candidate was
         # first seen; slots whose candidate we never saw drop out of the chain.
