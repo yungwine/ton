@@ -13,6 +13,7 @@ from consensus_explorer.mcp_server import (
     GroupSummary,
     GroupTimeline,
     LeaderStatsOut,
+    Network,
     SlotDetail,
     SlotTimings,
     TimingEntry,
@@ -176,7 +177,9 @@ def _group_a_data() -> ConsensusData:
 
 def _build(vset_provider: ValidatorSetInfoProvider | None = None) -> MCPServer:
     parser = FakeParser([GROUP_A, GROUP_B], {GROUP_A.valgroup_name: _group_a_data()})
-    return build_server(parser, LeaderStatsAnalyzer(parser, vset_provider))
+    return build_server(
+        {"mainnet": Network("mainnet", parser, LeaderStatsAnalyzer(parser, vset_provider))}
+    )
 
 
 type _ToolResult = CallToolResult | InputRequiredResult
@@ -238,6 +241,7 @@ async def test_list_groups_returns_most_recent_first_with_decoded_shard():
 
     assert _groups(result) == [
         GroupSummary(
+            network="mainnet",
             valgroup_name="-1,8000000000000000.8",
             group_start_est=2000.0,
             group_start_utc="1970-01-01T00:33:20+00:00",
@@ -246,6 +250,7 @@ async def test_list_groups_returns_most_recent_first_with_decoded_shard():
             catchain_seqno=8,
         ),
         GroupSummary(
+            network="mainnet",
             valgroup_name="0,8000000000000000.7",
             group_start_est=1000.0,
             group_start_utc="1970-01-01T00:16:40+00:00",
@@ -746,7 +751,7 @@ def _late_start_data() -> ConsensusData:
 
 def _build_late_start() -> MCPServer:
     parser = FakeParser([GROUP_C], {GROUP_C.valgroup_name: _late_start_data()})
-    return build_server(parser, LeaderStatsAnalyzer(parser))
+    return build_server({"mainnet": Network("mainnet", parser, LeaderStatsAnalyzer(parser))})
 
 
 @pytest.mark.asyncio
@@ -780,3 +785,103 @@ async def test_slot_timings_percentiles_cover_the_range_not_just_the_returned_ro
     assert [r.slot for r in timings.slots] == [20, 21, 22]
     by_metric = {p.metric: p for p in timings.percentiles}
     assert by_metric["candidate_to_finalize_ms"].count == 1
+
+
+GROUP_T = GroupInfo(
+    valgroup_hash=b"t",
+    catchain_seqno=7,
+    workchain=0,
+    shard=0x8000000000000000,
+    group_start_est=1500.0,
+)
+
+
+def _two_networks() -> MCPServer:
+    """Two networks whose newest groups share a valgroup name."""
+    main_parser = FakeParser([GROUP_A], {GROUP_A.valgroup_name: _group_a_data()})
+    test_data = ConsensusData(groups=[GROUP_T], slots=[], events=[])
+    test_parser = FakeParser([GROUP_T], {GROUP_T.valgroup_name: test_data})
+    return build_server(
+        {
+            "mainnet": Network("mainnet", main_parser, LeaderStatsAnalyzer(main_parser)),
+            "testnet": Network("testnet", test_parser, LeaderStatsAnalyzer(test_parser)),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_network_may_be_omitted_when_only_one_is_configured():
+    # Single-network deployments keep working without ever naming the network.
+    stats = _stats(
+        await _build().call_tool("group_leader_stats", {"valgroup_name": GROUP_A.valgroup_name})
+    )
+    assert stats.network == "mainnet"
+
+
+@pytest.mark.asyncio
+async def test_network_is_required_when_several_are_configured():
+    with pytest.raises(ToolError, match="mainnet, testnet"):
+        _ = await _two_networks().call_tool(
+            "group_leader_stats", {"valgroup_name": GROUP_A.valgroup_name}
+        )
+
+
+@pytest.mark.asyncio
+async def test_unknown_network_names_the_configured_ones():
+    with pytest.raises(ToolError, match="Unknown network 'devnet'"):
+        _ = await _two_networks().call_tool(
+            "group_leader_stats", {"valgroup_name": GROUP_A.valgroup_name, "network": "devnet"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_groups_searches_every_network_and_labels_each_result():
+    groups = _groups(await _two_networks().call_tool("list_groups", {}))
+
+    # GROUP_A and GROUP_T share a valgroup name, so the network is what tells
+    # them apart -- and results stay ordered by time across networks.
+    assert [(g.network, g.valgroup_name) for g in groups] == [
+        ("testnet", "0,8000000000000000.7"),
+        ("mainnet", "0,8000000000000000.7"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_groups_can_be_scoped_to_one_network():
+    groups = _groups(await _two_networks().call_tool("list_groups", {"network": "mainnet"}))
+
+    assert [g.network for g in groups] == ["mainnet"]
+
+
+@pytest.mark.asyncio
+async def test_a_group_is_only_found_on_its_own_network():
+    server = _two_networks()
+
+    ok = _stats(
+        await server.call_tool(
+            "group_leader_stats", {"valgroup_name": GROUP_A.valgroup_name, "network": "mainnet"}
+        )
+    )
+    assert ok.network == "mainnet"
+    # The same name on testnet has no slot data behind it.
+    with pytest.raises(ToolError, match="on testnet"):
+        _ = await server.call_tool(
+            "group_leader_stats", {"valgroup_name": GROUP_A.valgroup_name, "network": "testnet"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_every_group_bearing_response_carries_its_network():
+    server = _two_networks()
+    args = {"valgroup_name": GROUP_A.valgroup_name, "network": "mainnet"}
+
+    assert _timeline(await server.call_tool("group_timeline", args)).network == "mainnet"
+    assert _detail(await server.call_tool("slot_detail", {**args, "slot": 1})).network == "mainnet"
+    assert _timings_out(await server.call_tool("slot_timings", args)).network == "mainnet"
+    assert _health(await server.call_tool("group_health", args)).network == "mainnet"
+    assert (
+        _range(
+            await server.call_tool("leader_stats_range", {"network": "mainnet", "time_from": 0.0})
+        ).network
+        == "mainnet"
+    )

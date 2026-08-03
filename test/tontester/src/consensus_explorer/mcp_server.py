@@ -14,12 +14,14 @@ import math
 import os
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast, final
 
 from mcp.server import MCPServer
+from pydantic import TypeAdapter, ValidationError
 
 from .leader_stats import (
     GroupLeaderStats,
@@ -34,6 +36,20 @@ from .validator_set_info import ValidatorRef, ValidatorSetInfoProvider
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NETWORK = "default"
+
+
+@dataclass(frozen=True)
+class NetworkConfig:
+    stats_dir: str
+    db: str = ""
+    block_explorer_url: str = ""
+    validator_names_json: str = ""
+    cache_dir: str = ""
+
+
+_NETWORKS_ADAPTER = TypeAdapter(dict[str, NetworkConfig])
+
 _INSTRUCTIONS = """\
 Read-only access to TON consensus session stats collected from validators.
 
@@ -43,11 +59,25 @@ to find the ones covering the time window you care about, then drill in.
 
 Timestamps are unix seconds. Pass `last_minutes` instead of `time_from` when you
 want a window relative to now.
+
+{networks}
 """
+
+_ONE_NETWORK = """\
+Every result carries the `network` it came from. Only `{name}` is configured here,
+so the `network` argument can be omitted."""
+
+_MANY_NETWORKS = """\
+This server serves several separate networks: {names}. They have distinct
+validator sets and their valgroup names are NOT interchangeable, so pass
+`network` on every call, and carry the `network` from a `list_groups` result
+into the calls that follow. `list_groups` with no `network` searches all of
+them."""
 
 
 @dataclass(frozen=True)
 class GroupSummary:
+    network: str
     valgroup_name: str
     group_start_est: float
     group_start_utc: str
@@ -69,6 +99,7 @@ class ValidatorStatsOut:
 
 @dataclass(frozen=True)
 class GroupStatsOut:
+    network: str
     valgroup_id: str
     group_start_est: float
     group_start_utc: str
@@ -81,6 +112,7 @@ class GroupStatsOut:
 
 @dataclass(frozen=True)
 class LeaderStatsOut:
+    network: str
     groups: list[GroupStatsOut]
     aggregate: list[ValidatorStatsOut]
 
@@ -135,6 +167,7 @@ class EventOut:
 
 @dataclass(frozen=True)
 class GroupTimeline:
+    network: str
     valgroup_id: str
     slot_count: int
     event_count: int
@@ -159,6 +192,7 @@ class ObserverSlotDetail:
 
 @dataclass(frozen=True)
 class SlotDetail:
+    network: str
     valgroup_id: str
     slot: SlotOut
     status: str | None
@@ -198,6 +232,7 @@ class TimingPercentiles:
 
 @dataclass(frozen=True)
 class SlotTimings:
+    network: str
     valgroup_id: str
     slot_count: int
     slots: list[SlotTiming]
@@ -219,6 +254,7 @@ class BlockInterval:
 
 @dataclass(frozen=True)
 class GroupHealth:
+    network: str
     valgroup_id: str
     group_start_est: float
     group_start_utc: str
@@ -250,9 +286,10 @@ def _resolve_window(
     return time_from, time_until
 
 
-def _summarize(group: GroupData) -> GroupSummary:
+def _summarize(network: str, group: GroupData) -> GroupSummary:
     if isinstance(group, GroupInfo):
         return GroupSummary(
+            network=network,
             valgroup_name=group.valgroup_name,
             group_start_est=group.group_start_est,
             group_start_utc=_utc(group.group_start_est),
@@ -261,6 +298,7 @@ def _summarize(group: GroupData) -> GroupSummary:
             catchain_seqno=group.catchain_seqno,
         )
     return GroupSummary(
+        network=network,
         valgroup_name=group.valgroup_name,
         group_start_est=group.group_start_est,
         group_start_utc=_utc(group.group_start_est),
@@ -349,8 +387,9 @@ def _validator_out(v: ValidatorLeaderStats) -> ValidatorStatsOut:
     )
 
 
-def _group_stats_out(gs: GroupLeaderStats) -> GroupStatsOut:
+def _group_stats_out(network: str, gs: GroupLeaderStats) -> GroupStatsOut:
     return GroupStatsOut(
+        network=network,
         valgroup_id=gs.valgroup_id,
         group_start_est=gs.group_start_est,
         group_start_utc=_utc(gs.group_start_est),
@@ -362,13 +401,14 @@ def _group_stats_out(gs: GroupLeaderStats) -> GroupStatsOut:
     )
 
 
-def _stats_out(all_stats: list[GroupLeaderStats]) -> LeaderStatsOut:
+def _stats_out(network: str, all_stats: list[GroupLeaderStats]) -> LeaderStatsOut:
     agg = LeaderStatsAnalyzer.aggregate_by_validator(all_stats)
     aggregate = [_validator_out(v) for v in agg.values()]
     # Worst producers first: that is what anyone reading these numbers is after.
     aggregate.sort(key=lambda v: v.produced_pct if v.produced_pct is not None else 101.0)
     return LeaderStatsOut(
-        groups=[_group_stats_out(gs) for gs in all_stats],
+        network=network,
+        groups=[_group_stats_out(network, gs) for gs in all_stats],
         aggregate=aggregate,
     )
 
@@ -463,11 +503,44 @@ def _percentiles(metric: str, values: list[float]) -> TimingPercentiles | None:
     )
 
 
-def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MCPServer:
-    server = MCPServer(name="consensus-explorer", version="0.1.0", instructions=_INSTRUCTIONS)
+@final
+class Network:
+    """One network's data: its own index, parser and analyzer."""
+
+    def __init__(self, name: str, parser: GroupParser, analyzer: LeaderStatsAnalyzer):
+        self.name = name
+        self.parser = parser
+        self.analyzer = analyzer
+
+
+def build_server(networks: Mapping[str, Network]) -> MCPServer:
+    if not networks:
+        raise ValueError("At least one network must be configured.")
+    names = sorted(networks)
+    blurb = (
+        _ONE_NETWORK.format(name=names[0])
+        if len(names) == 1
+        else _MANY_NETWORKS.format(names=", ".join(f"`{n}`" for n in names))
+    )
+    server = MCPServer(
+        name="consensus-explorer",
+        version="0.1.0",
+        instructions=_INSTRUCTIONS.format(networks=blurb),
+    )
+
+    def pick(network: str | None) -> Network:
+        if network is not None:
+            chosen = networks.get(network)
+            if chosen is None:
+                raise ValueError(f"Unknown network {network!r}. Configured: {', '.join(names)}.")
+            return chosen
+        if len(names) == 1:
+            return networks[names[0]]
+        raise ValueError(f"Specify network: one of {', '.join(names)}.")
 
     @server.tool(name="list_groups")
     def _(
+        network: str | None = None,
         time_from: float | None = None,
         time_until: float | None = None,
         last_minutes: float | None = None,
@@ -476,16 +549,24 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         """List indexed validator group sessions, most recent first.
 
         Filters on the group's estimated start time (unix seconds). `last_minutes`
-        overrides `time_from` with a window relative to now. Use the returned
-        `valgroup_name` with the other tools.
+        overrides `time_from` with a window relative to now.
+
+        Omitting `network` searches every configured network. Each result carries
+        the `network` it came from; pass that back with its `valgroup_name` to the
+        other tools, since the same name can exist on more than one network.
         """
         start, until = _resolve_window(time_from, time_until, last_minutes)
-        groups = analyzer.list_groups(start, until)
-        groups.sort(key=lambda g: g.group_start_est, reverse=True)
-        return [_summarize(g) for g in groups[:limit]]
+        chosen = list(networks.values()) if network is None else [pick(network)]
+        found: list[GroupSummary] = []
+        for net in chosen:
+            groups = net.analyzer.list_groups(start, until)
+            groups.sort(key=lambda g: g.group_start_est, reverse=True)
+            found.extend(_summarize(net.name, g) for g in groups[:limit])
+        found.sort(key=lambda g: g.group_start_est, reverse=True)
+        return found[:limit]
 
     @server.tool(name="group_leader_stats")
-    def _(valgroup_name: str) -> GroupStatsOut:
+    def _(valgroup_name: str, network: str | None = None) -> GroupStatsOut:
         """Per-validator leader slot finalization stats for one group.
 
         For every slot in the observed range the leader is derived from the round
@@ -501,18 +582,20 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         validator set lookup configured (block explorer url plus
         show-validator-set binary).
         """
-        stats = analyzer.analyze_group(valgroup_name)
+        net = pick(network)
+        stats = net.analyzer.analyze_group(valgroup_name)
         if stats is None:
             raise ValueError(
                 (
-                    f"No leader stats for group {valgroup_name!r}: "
+                    f"No leader stats for group {valgroup_name!r} on {net.name}: "
                     "unknown group, or too few slots to infer the leader schedule."
                 )
             )
-        return _group_stats_out(stats)
+        return _group_stats_out(net.name, stats)
 
     @server.tool(name="leader_stats_range")
     def _(
+        network: str | None = None,
         time_from: float | None = None,
         time_until: float | None = None,
         last_minutes: float | None = None,
@@ -528,14 +611,16 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         Every group in the window is parsed, so keep windows to minutes rather
         than hours on a busy stats directory.
         """
+        net = pick(network)
         start, until = _resolve_window(time_from, time_until, last_minutes)
         if start is None and until is None:
             raise ValueError("Specify time_from, time_until or last_minutes to bound the window.")
-        return _stats_out(analyzer.analyze_time_range(start, until))
+        return _stats_out(net.name, net.analyzer.analyze_time_range(start, until))
 
     @server.tool(name="group_timeline")
     def _(
         valgroup_name: str,
+        network: str | None = None,
         slot_from: int | None = None,
         slot_to: int | None = None,
         limit: int = 200,
@@ -559,7 +644,8 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         per-validator validation breakdown. They run to kilobytes per slot and
         scale with validator count, so turn them on only for a narrow slot range.
         """
-        data = group_parser.parse_group(valgroup_name)
+        net = pick(network)
+        data = net.parser.parse_group(valgroup_name)
         slots = [
             s
             for s in data.slots
@@ -577,6 +663,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         slots.sort(key=lambda s: s.slot)
         events.sort(key=lambda e: (e.slot, e.t_ms))
         return GroupTimeline(
+            network=net.name,
             valgroup_id=valgroup_name,
             slot_count=len(slots),
             event_count=len(events),
@@ -588,16 +675,16 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             truncated=len(slots) > limit or len(events) > limit,
         )
 
-    def view(valgroup_name: str) -> _GroupView:
-        stats = analyzer.analyze_group(valgroup_name)
+    def view(net: Network, valgroup_name: str) -> _GroupView:
+        stats = net.analyzer.analyze_group(valgroup_name)
         return _GroupView(
             valgroup_name,
-            group_parser.parse_group(valgroup_name),
+            net.parser.parse_group(valgroup_name),
             _Roster(stats) if stats is not None else None,
         )
 
     @server.tool(name="slot_detail")
-    def _(valgroup_name: str, slot: int) -> SlotDetail:
+    def _(valgroup_name: str, slot: int, network: str | None = None) -> SlotDetail:
         """Everything known about one slot, broken down per validator.
 
         This is the drill-down for "slot N was slow or did not finalize": what
@@ -616,12 +703,13 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         only `skip_observed`, `block_accepted` and the `finalization` span --
         but they often have the widest certificate coverage of any node logged.
         """
-        v = view(valgroup_name)
+        net = pick(network)
+        v = view(net, valgroup_name)
         slot_data = v.slots.get(slot)
         if slot_data is None:
             known = sorted(v.slots)
             hint = f" Known slots run {known[0]}..{known[-1]}." if known else ""
-            raise ValueError(f"No slot {slot} in group {valgroup_name!r}.{hint}")
+            raise ValueError(f"No slot {slot} in group {valgroup_name!r} on {net.name}.{hint}")
 
         by_validator: dict[int, list[EventData]] = {}
         by_observer: dict[str, list[EventData]] = {}
@@ -653,6 +741,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             sorted(idx for idx in v.roster.by_idx if idx not in by_validator) if v.roster else []
         )
         return SlotDetail(
+            network=net.name,
             valgroup_id=valgroup_name,
             slot=_slot_out(slot_data, time_stats=True, validation_time_stats=False),
             status=v.status_of(slot),
@@ -669,6 +758,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
     @server.tool(name="slot_timings")
     def _(
         valgroup_name: str,
+        network: str | None = None,
         slot_from: int | None = None,
         slot_to: int | None = None,
         limit: int = 500,
@@ -688,7 +778,8 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         are nearest-rank over every non-null value in the range, including slots
         past `limit` -- only the per-slot rows are capped.
         """
-        v = view(valgroup_name)
+        net = pick(network)
+        v = view(net, valgroup_name)
         wanted = sorted(
             s
             for s in v.slots
@@ -727,6 +818,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             if (p := _percentiles(metric, [x for x in values if x is not None])) is not None
         ]
         return SlotTimings(
+            network=net.name,
             valgroup_id=valgroup_name,
             slot_count=len(wanted),
             # Percentiles stay over the whole range; only the rows are capped,
@@ -737,7 +829,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         )
 
     @server.tool(name="group_health")
-    def _(valgroup_name: str, max_slot_list: int = 50) -> GroupHealth:
+    def _(valgroup_name: str, network: str | None = None, max_slot_list: int = 50) -> GroupHealth:
         """Fastest read on whether a group is healthy.
 
         Counts every slot in the observed range by fate -- `finalized`, `empty`,
@@ -754,9 +846,12 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         block rate as observed. Slot lists are capped by `max_slot_list`; the
         counts are always complete.
         """
-        v = view(valgroup_name)
+        net = pick(network)
+        v = view(net, valgroup_name)
         if not v.slots:
-            raise ValueError(f"No slots for group {valgroup_name!r}; unknown or not yet indexed.")
+            raise ValueError(
+                f"No slots for group {valgroup_name!r} on {net.name}; unknown or not yet indexed."
+            )
 
         first_slot, last_slot = min(v.slots), max(v.slots)
 
@@ -814,6 +909,7 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             else v.slots[first_slot].slot_start_est_ms / 1000
         )
         return GroupHealth(
+            network=net.name,
             valgroup_id=valgroup_name,
             group_start_est=group_start,
             group_start_utc=_utc(group_start),
@@ -850,6 +946,14 @@ def _main() -> None:
     )
     source = ap.add_mutually_exclusive_group(required=True)
     _ = source.add_argument("--logs", nargs="+", help="Paths to log files or directory")
+    _ = source.add_argument(
+        "--networks",
+        help=(
+            "Path to a JSON file mapping network name to its stats_dir, db, "
+            "block_explorer_url, validator_names_json and cache_dir. Serves every "
+            "network from one process; replaces the single-network flags."
+        ),
+    )
     _ = source.add_argument(
         "--stats-dir",
         help=(
@@ -911,20 +1015,73 @@ def _main() -> None:
     sudo_helper = cast(str, raw.sudo_helper)
     poll_interval = cast(float, raw.poll_interval)
 
-    vset_provider = None
-    if block_explorer_url and show_validator_set_bin:
+    networks_str = cast(str | None, raw.networks)
+
+    def make_vset(
+        explorer_url: str, names_json: str, cache: str
+    ) -> ValidatorSetInfoProvider | None:
+        if not (explorer_url and show_validator_set_bin):
+            return None
         if not Path(show_validator_set_bin).exists():
             ap.error(f"show-validator-set binary not found at {show_validator_set_bin}")
-        vset_provider = ValidatorSetInfoProvider(
-            block_explorer_url,
-            show_validator_set_bin,
-            validator_names_json,
-            cache_dir=cache_dir or None,
+        return ValidatorSetInfoProvider(
+            explorer_url, show_validator_set_bin, names_json, cache_dir=cache or None
         )
 
-    def serve(group_parser: GroupParser) -> None:
-        server = build_server(group_parser, LeaderStatsAnalyzer(group_parser, vset_provider))
-        server.run(transport="stdio")
+    def indexed_network(
+        name: str, stats_dir: Path, db_path: Path, vset: ValidatorSetInfoProvider | None
+    ) -> tuple[Network, "FileIndex"]:
+        if not db_path.exists():
+            ap.error(
+                (
+                    f"No index database at {db_path} for network {name!r}. This server only "
+                    "reads an index; run consensus_explorer or leader_stats to build one."
+                )
+            )
+        # Read-only always: the index belongs to whichever process maintains it,
+        # and a second indexer over the same directory is pure duplicated work.
+        file_index = FileIndex(
+            stats_dir, db_path, read_only=True, poll_interval_seconds=poll_interval
+        )
+        parser = CachedGroupParser(file_index, hostname_regex, sudo_helper=sudo_helper or None)
+        file_index.install_callback(parser)
+        return Network(name, parser, LeaderStatsAnalyzer(parser, vset)), file_index
+
+    if networks_str:
+        from .cached_parser import CachedGroupParser
+        from .file_index import FileIndex
+
+        config_path = Path(networks_str)
+        if not config_path.exists():
+            ap.error(f"Networks config not found at {config_path}")
+        try:
+            configs = _NETWORKS_ADAPTER.validate_json(config_path.read_text(encoding="utf-8"))
+        except ValidationError as exc:
+            ap.error(f"Invalid networks config {config_path}: {exc}")
+        if not configs:
+            ap.error(f"Networks config {config_path} defines no networks")
+
+        built: dict[str, Network] = {}
+        indexes: list[FileIndex] = []
+        for name, cfg in configs.items():
+            stats_dir = Path(cfg.stats_dir)
+            db_path = Path(cfg.db) if cfg.db else stats_dir / "index.db"
+            net, index = indexed_network(
+                name,
+                stats_dir,
+                db_path,
+                make_vset(cfg.block_explorer_url, cfg.validator_names_json, cfg.cache_dir),
+            )
+            built[name] = net
+            indexes.append(index)
+
+        with ExitStack() as stack:
+            for index in indexes:
+                _ = stack.enter_context(index)
+            build_server(built).run(transport="stdio")
+        return
+
+    vset_provider = make_vset(block_explorer_url, validator_names_json, cache_dir)
 
     if stats_dir_str:
         from .cached_parser import CachedGroupParser
@@ -932,30 +1089,9 @@ def _main() -> None:
 
         stats_dir = Path(stats_dir_str)
         db_path = Path(db_str) if db_str else stats_dir / "index.db"
-
-        if not db_path.exists():
-            ap.error(
-                (
-                    f"No index database at {db_path}. This server only reads an index; "
-                    "run consensus_explorer or leader_stats against --stats-dir to build one."
-                )
-            )
-
-        # Read-only always: the index belongs to whichever process maintains it,
-        # and a second indexer over the same directory is pure duplicated work.
-        file_index = FileIndex(
-            stats_dir,
-            db_path,
-            read_only=True,
-            poll_interval_seconds=poll_interval,
-        )
-        cached_parser = CachedGroupParser(
-            file_index, hostname_regex, sudo_helper=sudo_helper or None
-        )
-        file_index.install_callback(cached_parser)
-
+        net, file_index = indexed_network(DEFAULT_NETWORK, stats_dir, db_path, vset_provider)
         with file_index:
-            serve(cached_parser)
+            build_server({DEFAULT_NETWORK: net}).run(transport="stdio")
     else:
         from .parser.parser_session_stats import ParserSessionStats
 
@@ -968,7 +1104,15 @@ def _main() -> None:
             else:
                 log_paths.append(p)
 
-        serve(ParserSessionStats(log_paths, hostname_regex))
+        parser = ParserSessionStats(log_paths, hostname_regex)
+        server = build_server(
+            {
+                DEFAULT_NETWORK: Network(
+                    DEFAULT_NETWORK, parser, LeaderStatsAnalyzer(parser, vset_provider)
+                )
+            }
+        )
+        server.run(transport="stdio")
 
 
 if __name__ == "__main__":
