@@ -132,7 +132,7 @@ class LeaderStatsAnalyzer:
         # finalized history. Visited slots are finalized (non-empty), slots
         # skipped over between parent links are empty, everything else is
         # unknown.
-        finalized_history = _walk_finalized_chains(directly_finalized, group_slots)
+        finalized_history = walk_finalized_chains(directly_finalized, group_slots)
 
         if self._verbose:
             print(
@@ -169,17 +169,13 @@ class LeaderStatsAnalyzer:
         # Enrich with ADNL info if available
         if self._vset_provider and isinstance(group_info, GroupInfo):
             try:
-                vset_text = self._vset_provider.get_validator_set_text(valgroup_name, data.slots)
-                adnl_map = _parse_vset_text(vset_text)
-                if not adnl_map:
-                    logger.warning(
-                        "No ADNLs resolved for %s: %s", valgroup_name, vset_text.strip()[:200]
-                    )
-                for idx, (adnl, pub_key_hash, name) in adnl_map.items():
+                for idx, ref in self._vset_provider.get_validators(
+                    valgroup_name, data.slots
+                ).items():
                     if idx in stats_by_validator:
-                        stats_by_validator[idx].adnl = adnl
-                        stats_by_validator[idx].pub_key_hash = pub_key_hash
-                        stats_by_validator[idx].name = name
+                        stats_by_validator[idx].adnl = ref.adnl
+                        stats_by_validator[idx].pub_key_hash = ref.pub_key_hash
+                        stats_by_validator[idx].name = ref.name
             except Exception:
                 logger.exception("Validator set lookup failed for %s", valgroup_name)
 
@@ -269,7 +265,7 @@ def _parse_parent_slot(parent_block: str | None) -> int | None:
     return int(m.group(1))
 
 
-def _walk_finalized_chains(
+def walk_finalized_chains(
     directly_finalized: set[int],
     group_slots: dict[int, SlotData],
 ) -> dict[int, SlotStatus]:
@@ -356,24 +352,6 @@ def _infer_group_params(
         return num_validators, leader_window
 
     return num_validators, leader_window
-
-
-def _parse_vset_text(text: str) -> dict[int, tuple[str, str, str]]:
-    """Parse validator set text output to get idx -> (adnl, pub_key_hash, name)."""
-    result: dict[int, tuple[str, str, str]] = {}
-    for line in text.splitlines():
-        parts = line.split("|")
-        if len(parts) >= 4:
-            try:
-                idx = int(parts[0].strip())
-                adnl = parts[1].strip()
-                pub_key_hash = parts[2].strip()
-                name = parts[3].strip()
-                if len(adnl) == 64:
-                    result[idx] = (adnl, pub_key_hash, name)
-            except ValueError, IndexError:
-                continue
-    return result
 
 
 def _serialize_validator(v: ValidatorLeaderStats) -> dict[str, str | int]:

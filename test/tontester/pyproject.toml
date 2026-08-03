@@ -5,6 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "dash",
     "flask",
+    "mcp>=2.0.0",
     "plotly",
     "pytoniq-core",
     "requests",
@@ -13,4 +14,5 @@ dependencies = [
 
 [project.scripts]
 consensus_explorer = "consensus_explorer.explorer:_main"
+consensus_explorer_mcp = "consensus_explorer.mcp_server:_main"
 leader_stats = "consensus_explorer.leader_stats:_main"

@@ -1,9 +1,11 @@
 import json
+import logging
 import math
 import re
 import subprocess
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
 from typing import cast, final
@@ -12,6 +14,23 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 import requests
 
 from .models import SlotData
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ValidatorRef:
+    """Identity of one validator inside a group.
+
+    `idx` is group local -- the same operator gets a different index in the
+    next group. `adnl` is the stable identity across groups. `name` is the
+    label the validator names json maps that adnl to, empty when unmapped.
+    """
+
+    idx: int
+    adnl: str
+    pub_key_hash: str
+    name: str
 
 
 @final
@@ -39,6 +58,7 @@ class ValidatorSetInfoProvider:
         # A group's validator set never changes, but resolving it costs two
         # explorer round trips even when the output is already on disk.
         self._text_cache: dict[str, str] = {}
+        self._validators_cache: dict[str, dict[int, ValidatorRef]] = {}
 
     @staticmethod
     def _resolve_show_validator_set_bin(path: str | Path | None) -> Path | None:
@@ -379,3 +399,52 @@ class ValidatorSetInfoProvider:
         # Successes only, so a transient explorer failure does not stick.
         self._text_cache[valgroup_id] = result
         return result
+
+    @staticmethod
+    def _parse_validator_table(text: str) -> dict[int, ValidatorRef]:
+        """Read back the `idx | adnl | pub_key_hash | name` table, keyed by index.
+
+        Header and prose lines fall out on their own: they have no leading
+        integer, or no 64 hex character adnl.
+        """
+        result: dict[int, ValidatorRef] = {}
+        for line in text.splitlines():
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            try:
+                idx = int(parts[0].strip())
+            except ValueError:
+                continue
+            adnl = parts[1].strip()
+            if len(adnl) != 64:
+                continue
+            result[idx] = ValidatorRef(
+                idx=idx,
+                adnl=adnl,
+                pub_key_hash=parts[2].strip(),
+                name=parts[3].strip(),
+            )
+        return result
+
+    def get_validators(
+        self, valgroup_id: str, slots: Sequence[SlotData]
+    ) -> dict[int, ValidatorRef]:
+        """Validator identities for a group, keyed by group local index.
+
+        Empty when lookup is unconfigured or the set could not be resolved --
+        callers cannot tell those apart and should treat both as "unknown".
+        """
+        cached = self._validators_cache.get(valgroup_id)
+        if cached is not None:
+            return cached
+
+        text = self.get_validator_set_text(valgroup_id, slots)
+        validators = self._parse_validator_table(text)
+        if not validators:
+            logger.warning("No validators resolved for %s: %s", valgroup_id, text.strip()[:200])
+            return validators
+
+        # Mirror _text_cache: only successes stick.
+        self._validators_cache[valgroup_id] = validators
+        return validators

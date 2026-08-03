@@ -47,18 +47,48 @@ class FileIndexCallback(Protocol):
 
 @final
 class FileIndex:
-    def __init__(self, stats_dir: Path, db_path: Path, sudo_helper: str | None = None):
+    def __init__(
+        self,
+        stats_dir: Path,
+        db_path: Path,
+        sudo_helper: str | None = None,
+        *,
+        read_only: bool = False,
+        poll_interval_seconds: float = 5.0,
+    ):
+        """Index of the session stats files in ``stats_dir``.
+
+        With ``read_only``, another process owns the index: this one never
+        writes to it and never reads the stats directory, it only polls the
+        database every ``poll_interval_seconds`` to pick up the owner's work.
+        """
         self._stats_dir = stats_dir
         self._db_path = db_path
         self._sudo_helper = sudo_helper
+        self._read_only = read_only
+        self._poll_interval_seconds = poll_interval_seconds
         self._callback: FileIndexCallback | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+
+        if read_only:
+            if not db_path.exists():
+                raise FileNotFoundError(
+                    f"Index database not found at {db_path}; read-only mode cannot create it"
+                )
+            return
 
         with self._connection() as conn:
             self._create_tables(conn)
 
     def _connect(self) -> sqlite3.Connection:
+        if self._read_only:
+            # mode=ro so a stray write fails here rather than corrupting an
+            # index this process does not own. The journal mode is the owner's
+            # to set: switching it needs a write and would fail.
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            return conn
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
         _ = conn.execute("PRAGMA journal_mode=WAL")
@@ -128,7 +158,8 @@ class FileIndex:
         self._callback = callback
 
     def __enter__(self) -> FileIndex:
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        target = self._poll_read_only if self._read_only else self._run
+        self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
         return self
 
@@ -269,7 +300,7 @@ class FileIndex:
         if existing and existing[0]["mtime"] == mtime:
             return set()
 
-        print(f"Indexing file {path} ({file_idx} out of {file_count})", flush=True)
+        logger.info("Indexing file %s (%d out of %d)", path, file_idx, file_count)
         try:
             scan = self._scan_file(path)
         except Exception as exc:
@@ -375,7 +406,7 @@ class FileIndex:
         return changed_hashes
 
     def _remove_file(self, path: Path, conn: sqlite3.Connection) -> set[bytes]:
-        print(f"Removing file {path}", flush=True)
+        logger.info("Removing file %s", path)
         path = path.resolve()
         file_name = str(path)
         cursor = conn.cursor()
@@ -427,7 +458,7 @@ class FileIndex:
 
         try:
             self._initial_scan(conn)
-            print("Initial indexing complete, watching for changes", flush=True)
+            logger.info("Initial indexing complete, watching for changes")
 
             while not self._stop_event.is_set():
                 try:
@@ -461,6 +492,92 @@ class FileIndex:
         finally:
             notify.close()
             conn.close()
+
+    def _index_fingerprint(self) -> tuple[tuple[float, int], ...]:
+        """Cheap "has the owner touched the index" check.
+
+        Under WAL the commits land in the sidecar, so the main database file
+        can sit untouched for a long time; both have to be looked at.
+        """
+        prints: list[tuple[float, int]] = []
+        for path in (self._db_path, self._db_path.with_name(f"{self._db_path.name}-wal")):
+            try:
+                stat = path.stat()
+            except OSError:
+                prints.append((0.0, 0))
+            else:
+                prints.append((stat.st_mtime, stat.st_size))
+        return tuple(prints)
+
+    def _indexed_files(self) -> dict[int, tuple[float, frozenset[bytes]]]:
+        """file_id -> (mtime, groups found in it), the owner's view of the world."""
+
+        class Row(TypedDict):
+            file_id: int
+            mtime: float
+            valgroup_hash: bytes | None
+
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            _ = cursor.execute("""
+                SELECT f.file_id, f.mtime, g.valgroup_hash
+                FROM files f
+                LEFT JOIN group_files gf ON gf.file_id = f.file_id
+                LEFT JOIN groups g ON g.group_id = gf.group_id
+            """)
+            rows = cast(list[Row], cursor.fetchall())
+
+        mtimes: dict[int, float] = {}
+        hashes: dict[int, set[bytes]] = {}
+        for row in rows:
+            file_id = row["file_id"]
+            mtimes[file_id] = row["mtime"]
+            bucket = hashes.setdefault(file_id, set())
+            valgroup_hash = row["valgroup_hash"]
+            if valgroup_hash is not None:
+                bucket.add(valgroup_hash)
+        return {file_id: (mtime, frozenset(hashes[file_id])) for file_id, mtime in mtimes.items()}
+
+    def _poll_read_only(self) -> None:
+        """Mirror the owner's invalidations without touching the index.
+
+        The stats directory belongs to whoever writes the index, so changes are
+        picked up by diffing the indexed files rather than by watching disk.
+        """
+        try:
+            fingerprint = self._index_fingerprint()
+            snapshot = self._indexed_files()
+        except sqlite3.Error as exc:
+            logger.exception("Failed to read index %s: %s", self._db_path, exc)
+            return
+
+        while not self._stop_event.wait(self._poll_interval_seconds):
+            current_fingerprint = self._index_fingerprint()
+            if current_fingerprint == fingerprint:
+                continue
+            fingerprint = current_fingerprint
+
+            try:
+                current = self._indexed_files()
+            except sqlite3.Error as exc:
+                logger.warning("Failed to poll index %s: %s", self._db_path, exc)
+                continue
+
+            changed: set[bytes] = set()
+            for file_id, (mtime, hashes) in current.items():
+                previous = snapshot.get(file_id)
+                if previous is None:
+                    changed |= hashes
+                elif previous[0] != mtime:
+                    # Both sides: a re-index can drop a group from a file too.
+                    changed |= hashes | previous[1]
+            for file_id, (_, hashes) in snapshot.items():
+                if file_id not in current:
+                    changed |= hashes
+            snapshot = current
+
+            if changed and self._callback is not None:
+                self._callback.on_files_changed(changed)
 
     def _initial_scan(self, conn: sqlite3.Connection) -> None:
         class DbFileRow(TypedDict):
