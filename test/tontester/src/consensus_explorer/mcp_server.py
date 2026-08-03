@@ -122,7 +122,7 @@ class EventOut:
     label: str
     kind: str
     t_ms: float
-    validator: int | None
+    validator: int | str | None
     # Span events (collation, block_validation, notarize, finalize, ...) carry
     # their end in t1_ms; for point events both are absent.
     t1_ms: float | None
@@ -152,6 +152,12 @@ class ValidatorSlotDetail:
 
 
 @dataclass(frozen=True)
+class ObserverSlotDetail:
+    host: str
+    events: list[EventOut]
+
+
+@dataclass(frozen=True)
 class SlotDetail:
     valgroup_id: str
     slot: SlotOut
@@ -161,6 +167,9 @@ class SlotDetail:
     # group level phases, crosslinks.
     group_events: list[EventOut]
     validators: list[ValidatorSlotDetail]
+    # Nodes following the group without being in its validator set, keyed by
+    # host. They never collate or vote, so they only carry observed events.
+    observers: list[ObserverSlotDetail]
     # In the validator set but silent for this slot -- no votes, no candidate,
     # nothing. Either they were down or their logs are not collected.
     silent_validators: list[int]
@@ -601,6 +610,11 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
         `skip_observed`. `silent_validators` lists set members with no events at
         all here -- which means either they were down or their logs are not
         collected, and those two look identical from the outside.
+
+        `observers` holds nodes that follow the group without being in its
+        validator set, keyed by host. They never collate or vote, so they carry
+        only `skip_observed`, `block_accepted` and the `finalization` span --
+        but they often have the widest certificate coverage of any node logged.
         """
         v = view(valgroup_name)
         slot_data = v.slots.get(slot)
@@ -610,12 +624,15 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             raise ValueError(f"No slot {slot} in group {valgroup_name!r}.{hint}")
 
         by_validator: dict[int, list[EventData]] = {}
+        by_observer: dict[str, list[EventData]] = {}
         group_events: list[EventData] = []
         for e in v.slot_events(slot):
             if e.validator is None:
                 group_events.append(e)
-            else:
+            elif isinstance(e.validator, int):
                 by_validator.setdefault(e.validator, []).append(e)
+            else:
+                by_observer.setdefault(e.validator, []).append(e)
 
         validation_stats = slot_data.validation_time_stats or {}
         leader_idx = v.roster.leader_idx(slot) if v.roster else None
@@ -642,6 +659,10 @@ def build_server(group_parser: GroupParser, analyzer: LeaderStatsAnalyzer) -> MC
             leader=v.roster.leader(slot) if v.roster else None,
             group_events=[_event_out(e) for e in group_events],
             validators=validators,
+            observers=[
+                ObserverSlotDetail(host=host, events=[_event_out(e) for e in events])
+                for host, events in sorted(by_observer.items())
+            ],
             silent_validators=silent,
         )
 

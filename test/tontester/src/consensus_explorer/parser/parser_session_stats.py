@@ -47,7 +47,7 @@ type slot_id_type = tuple[str, int]
 @dataclasses.dataclass
 class VoteData:
     t_ms: float
-    v_id: int
+    v_id: int | str
     weight: int
 
 
@@ -163,7 +163,7 @@ class ParserSessionStats(GroupParser):
         self._total_validators: dict[str, int] = {}
         self._slots_per_leader_window: dict[str, int] = {}
         self._seen_validators: dict[str, set[int]] = {}
-        self._slot_events: dict[slot_id_type, dict[int, dict[str, EventData]]] = {}
+        self._slot_events: dict[slot_id_type, dict[int | str, dict[str, EventData]]] = {}
         self._events: list[EventData] = []
 
         self.with_cache = with_cache
@@ -217,7 +217,7 @@ class ParserSessionStats(GroupParser):
         event: TypeConsensus_stats_Event,
         t_ms: float,
         v_group: str,
-        v_id: int,
+        v_id: int | str,
     ):
         if not isinstance(event, tuple(TARGET_TO_LABEL.keys())):
             return
@@ -301,7 +301,7 @@ class ParserSessionStats(GroupParser):
         event: Consensus_simplex_stats_certObserved,
         t_ms: float,
         v_group: str,
-        v_id: int,
+        v_id: int | str,
         get_slot_leader: Callable[[int], int],
     ):
         assert event.vote is not None
@@ -373,7 +373,7 @@ class ParserSessionStats(GroupParser):
         event: Consensus_simplex_stats_voted,
         t_ms: float,
         v_group: str,
-        v_id: int,
+        v_id: int | str,
         v_weight: int,
     ):
         vote = event.vote
@@ -717,6 +717,7 @@ class ParserSessionStats(GroupParser):
         self,
         group_id: bytes,
         events: list[Consensus_stats_timestampedEvent],
+        hostname: str,
     ) -> GroupData:
         event_id: Consensus_stats_id | None = None
         min_ts = float("inf")
@@ -730,12 +731,13 @@ class ParserSessionStats(GroupParser):
 
         v_group = f"{event_id.workchain},{_shard_to_hex(event_id.shard)}.{event_id.cc_seqno}"
 
-        v_id = event_id.idx
+        v_id: int | str = event_id.idx if event_id.idx >= 0 else hostname
         v_weight = event_id.weight
         self._total_weights[v_group] = event_id.total_weight
         self._total_validators[v_group] = event_id.total_validators
         self._slots_per_leader_window[v_group] = event_id.slots_per_leader_window
-        self._seen_validators.setdefault(v_group, set()).add(v_id)
+        if isinstance(v_id, int):
+            self._seen_validators.setdefault(v_group, set()).add(v_id)
 
         def get_slot_leader(slot: int):
             return slot // event_id.slots_per_leader_window % event_id.total_validators
@@ -947,7 +949,7 @@ class ParserSessionStats(GroupParser):
 
         for hostname, hostname_groups in merged.items():
             for group_id, events in hostname_groups.items():
-                group_info = self._process_group_events(group_id, events)
+                group_info = self._process_group_events(group_id, events, hostname)
                 if group_id not in groups:
                     groups[group_id] = group_info
                 else:

@@ -138,6 +138,30 @@ def _group_a_data() -> ConsensusData:
         ),
         EventData(
             valgroup_id=name,
+            slot=2,
+            label="skip_observed",
+            kind="local",
+            t_ms=2100.0,
+            validator="ton-nval-01n",
+        ),
+        EventData(
+            valgroup_id=name,
+            slot=2,
+            label="block_accepted",
+            kind="local",
+            t_ms=2200.0,
+            validator="ton-nval-02n",
+        ),
+        EventData(
+            valgroup_id=name,
+            slot=2,
+            label="notarize_vote",
+            kind="local",
+            t_ms=2050.0,
+            validator=1,
+        ),
+        EventData(
+            valgroup_id=name,
             slot=4,
             label="mc_ref_finalized",
             kind="crosslink",
@@ -304,10 +328,13 @@ async def test_group_timeline_filters_by_slot_and_flags_truncation():
 
     assert [s.slot for s in windowed.slots] == [1, 2]
     assert sorted(e.label for e in windowed.events) == [
+        "block_accepted",
         "candidate_received",
         "collate",
         "collation",
         "finalize_vote",
+        "notarize_vote",
+        "skip_observed",
     ]
     assert windowed.truncated is False
     assert truncated.slot_count == 5
@@ -644,3 +671,38 @@ async def test_group_health_caps_slot_lists_but_not_counts():
     assert health.skipped_slots == []
     assert health.slot_lists_truncated is True
     assert health.skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_slot_detail_separates_observers_from_validators(monkeypatch: pytest.MonkeyPatch):
+    detail = _detail(
+        await _build(_stub_vset(monkeypatch)).call_tool(
+            "slot_detail", {"valgroup_name": GROUP_A.valgroup_name, "slot": 2}
+        )
+    )
+
+    # A set member stays a validator row with a resolvable identity.
+    assert [v.validator.idx for v in detail.validators] == [1]
+    assert detail.validators[0].validator.name == "ton-tval-02"
+    # Nodes outside the set are their own bucket, keyed by host, one row each
+    # rather than collapsed together.
+    assert [(o.host, [e.label for e in o.events]) for o in detail.observers] == [
+        ("ton-nval-01n", ["skip_observed"]),
+        ("ton-nval-02n", ["block_accepted"]),
+    ]
+    # Observers are not set members, so they never count as silent validators.
+    assert detail.silent_validators == [0]
+
+
+@pytest.mark.asyncio
+async def test_group_timeline_keeps_observer_host_on_events():
+    timeline = _timeline(
+        await _build().call_tool(
+            "group_timeline", {"valgroup_name": GROUP_A.valgroup_name, "slot_from": 2, "slot_to": 2}
+        )
+    )
+
+    by_label = {e.label: e.validator for e in timeline.events}
+    assert by_label["skip_observed"] == "ton-nval-01n"
+    assert by_label["block_accepted"] == "ton-nval-02n"
+    assert by_label["notarize_vote"] == 1

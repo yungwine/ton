@@ -54,7 +54,7 @@ class EventData:
     label: str
     kind: str
     t_ms: float
-    validator: int | None = None
+    validator: int | str | None = None
     t1_ms: float | None = None
     source_valgroup_id: str | None = None
     source_slot: int | None = None

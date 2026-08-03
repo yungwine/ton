@@ -301,7 +301,7 @@ class DetailFigureBuilder:
 
         return parts
 
-    def _event_hover_text(self, label: str, validator: int | None) -> str:
+    def _event_hover_text(self, label: str, validator: int | str | None) -> str:
         if label == "collation":
             parts = ""
             if self._slot.collate_target_slot is not None:
@@ -312,7 +312,7 @@ class DetailFigureBuilder:
         if (
             label == "block_validation"
             and self._slot.validation_time_stats
-            and validator is not None
+            and isinstance(validator, int)
         ):
             v_ts = self._slot.validation_time_stats.get(validator)
             if v_ts:
@@ -405,7 +405,9 @@ class DetailFigureBuilder:
         if self._slot.is_empty:
             title += " · empty"
 
-        validators = sorted({e.validator for e in events if e.validator is not None})
+        keys = {e.validator for e in events if e.validator is not None}
+        validators: list[int | str] = sorted(k for k in keys if isinstance(k, int))
+        validators += sorted(k for k in keys if isinstance(k, str))
         x_title = "t - slot_start_est (ms)" if self._time_mode == "rel" else "Time (UTC)"
 
         _ = self._fig.update_layout(  # pyright: ignore[reportUnknownMemberType]

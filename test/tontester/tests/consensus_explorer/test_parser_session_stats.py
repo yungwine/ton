@@ -10,10 +10,14 @@ from consensus_explorer.parser.parser_session_stats import ParserSessionStats
 from consensus_explorer.visualizer.figure_builder import FigureBuilder
 from tonapi.ton_api import (
     Consensus_candidateId,
+    Consensus_simplex_skipVote,
+    Consensus_simplex_stats_certObserved,
     Consensus_stats_blockAccepted,
     Consensus_stats_collateFinished,
     Consensus_stats_collateStarted,
     Consensus_stats_events,
+    Consensus_stats_id,
+    Consensus_stats_timestampedEvent,
 )
 
 # Vendored session-stats logs from a 2-node local network (see test_basic.py).
@@ -220,3 +224,60 @@ def test_parser_emits_block_accepted_events():
     # A point in time for the node that accepted it, not an inferred span.
     assert all(e.t1_ms is None and e.validator is not None for e in accepted)
     assert {e.kind for e in accepted} == {"local"}
+
+
+def _observer_batch(idx: int, slots: list[int]) -> list[Consensus_stats_timestampedEvent]:
+    events = [
+        Consensus_stats_timestampedEvent(
+            ts=1.0,
+            event=Consensus_stats_id(
+                workchain=0,
+                shard=0,
+                cc_seqno=1,
+                idx=idx,
+                total_validators=2,
+                weight=0 if idx < 0 else 5,
+                total_weight=10,
+                slots_per_leader_window=1,
+            ),
+        )
+    ]
+    for slot in slots:
+        events.append(
+            Consensus_stats_timestampedEvent(
+                ts=2.0 + slot,
+                event=Consensus_simplex_stats_certObserved(
+                    vote=Consensus_simplex_skipVote(slot=slot)
+                ),
+            )
+        )
+    return events
+
+
+def test_observers_are_keyed_by_host_not_merged_under_index_minus_one():
+    """Nodes outside the validator set all report idx -1.
+
+    Keying their events by index collapsed every such node into one bucket,
+    where each overwrote the last in _slot_events.
+    """
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+
+    _ = parser._process_group_events(b"g", _observer_batch(-1, [7]), "host-a")
+    _ = parser._process_group_events(b"g", _observer_batch(-1, [7]), "host-b")
+    _ = parser._process_group_events(b"g", _observer_batch(0, [7]), "host-c")
+
+    per_validator = parser._slot_events[("0,0000000000000000.1", 7)]
+    assert set(per_validator) == {"host-a", "host-b", 0}
+    assert all("skip_observed" in labels for labels in per_validator.values())
+
+
+def test_observers_do_not_count_towards_validator_coverage():
+    """total_validators counts set members, so observers must not inflate it."""
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+
+    _ = parser._process_group_events(b"g", _observer_batch(-1, [1]), "host-a")
+    _ = parser._process_group_events(b"g", _observer_batch(-1, [1]), "host-b")
+    _ = parser._process_group_events(b"g", _observer_batch(1, [1]), "host-c")
+
+    # Three hosts reported, but only one is in the set of two.
+    assert parser._seen_validators["0,0000000000000000.1"] == {1}
