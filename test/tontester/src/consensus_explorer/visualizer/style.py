@@ -21,6 +21,7 @@ COLOR_MAP = {
     "finalization": "brown",
     "skip_observed": "#bcbd22",
     "candidate_received": "#17becf",
+    "block_accepted": "#7f7f7f",
     "collate_started": "#93E5AB",
     "collate_finished": "#65B891",
     "notarize_vote": "#d62728",

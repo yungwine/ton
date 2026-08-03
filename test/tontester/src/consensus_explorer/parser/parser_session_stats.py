@@ -21,6 +21,7 @@ from tonapi.ton_api import (
     Consensus_simplex_stats_certObserved,
     Consensus_simplex_stats_voted,
     Consensus_stats_block,
+    Consensus_stats_blockAccepted,
     Consensus_stats_candidateReceived,
     Consensus_stats_collatedEmpty,
     Consensus_stats_collateFinished,
@@ -57,7 +58,10 @@ TARGET_TO_LABEL = {
     Consensus_stats_collatedEmpty: "collate_finished",
     Consensus_stats_validationStarted: "validate_started",
     Consensus_stats_validationFinished: "validate_finished",
+    Consensus_stats_blockAccepted: "block_accepted",
 }
+
+POINT_LABELS = ("candidate_received", "block_accepted")
 
 
 def open_stats_file(path: Path, sudo_helper: str | None = None) -> io.TextIOWrapper:
@@ -267,7 +271,7 @@ class ParserSessionStats(GroupParser):
                 case None:
                     assert False
 
-        if label == "candidate_received":
+        if label in POINT_LABELS:
             self._events.append(ev)
 
         if label in ("collate_started", "collate_finished"):

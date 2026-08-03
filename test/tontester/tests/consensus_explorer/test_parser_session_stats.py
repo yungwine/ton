@@ -1,5 +1,6 @@
 # pyright: reportPrivateUsage=false
 
+import gzip
 import shutil
 from pathlib import Path
 
@@ -9,8 +10,10 @@ from consensus_explorer.parser.parser_session_stats import ParserSessionStats
 from consensus_explorer.visualizer.figure_builder import FigureBuilder
 from tonapi.ton_api import (
     Consensus_candidateId,
+    Consensus_stats_blockAccepted,
     Consensus_stats_collateFinished,
     Consensus_stats_collateStarted,
+    Consensus_stats_events,
 )
 
 # Vendored session-stats logs from a 2-node local network (see test_basic.py).
@@ -190,3 +193,30 @@ def test_collation_same_slot_unchanged():
     assert "collate_finished" in parser._slot_events[slot_id][v_id]
     assert parser._slot_events[slot_id][v_id]["collate_started"].slot == slot
     assert parser._slot_events[slot_id][v_id]["collate_finished"].slot == slot
+
+
+def test_parser_emits_block_accepted_events():
+    """consensus.stats.blockAccepted is an observer's only timing signal.
+
+    Nodes that follow a group without being in its validator set emit nothing
+    but certObserved and blockAccepted, so dropping the latter left them with
+    no measurable moment of their own.
+    """
+    raw = 0
+    for path in _stats_logs():
+        with gzip.open(path, "rt") as fh:
+            for line in fh:
+                if not line.startswith('{"@type":"consensus.stats.events"'):
+                    continue
+                for entry in Consensus_stats_events.from_json(line).events:
+                    if isinstance(entry.event, Consensus_stats_blockAccepted):
+                        raw += 1
+    assert raw > 0, "fixture no longer contains blockAccepted records"
+
+    data = ParserSessionStats(_stats_logs(), r"^(.*)$", with_cache=False).parse()
+
+    accepted = [e for e in data.events if e.label == "block_accepted"]
+    assert len(accepted) == raw
+    # A point in time for the node that accepted it, not an inferred span.
+    assert all(e.t1_ms is None and e.validator is not None for e in accepted)
+    assert {e.kind for e in accepted} == {"local"}
