@@ -4,6 +4,7 @@ import dataclasses
 import gzip
 import io
 import logging
+import math
 import os
 import re
 from collections.abc import Sequence
@@ -220,6 +221,19 @@ class ParserSessionStats(GroupParser):
             return None
         return slot // slots_per_leader_window % total_validators
 
+    @staticmethod
+    def _record_candidate(
+        slot_data: SlotData, id_: Consensus_candidateId, *, accepted: bool
+    ) -> None:
+        """Remember which candidate a slot carried.
+
+        Every event that names a candidate carries its {slot, hash}, not just
+        candidateReceived -- which only the collating node emits, so relying on
+        it alone leaves the id blank for most slots.
+        """
+        if accepted or slot_data.candidate_id is None:
+            slot_data.candidate_id = format_candidate_id(id_)
+
     def _parse_stats_event(
         self,
         event: TypeConsensus_stats_Event,
@@ -229,11 +243,13 @@ class ParserSessionStats(GroupParser):
     ):
         if not isinstance(event, tuple(TARGET_TO_LABEL.keys())):
             return
+        candidate: Consensus_candidateId | None = None
         if isinstance(event, Consensus_stats_collateStarted):
             slot = event.target_slot
         else:
             assert event.id is not None, f"id is None for {event}"
             slot = event.id.slot
+            candidate = event.id
         assert slot is not None, f"Slot is None for {event}"
 
         slot_id = (v_group, slot)
@@ -244,6 +260,15 @@ class ParserSessionStats(GroupParser):
 
         if isinstance(event, Consensus_stats_collateStarted) and isinstance(v_id, int):
             slot_data.collator = v_id
+
+        if candidate is not None:
+            # blockAccepted names the candidate that actually became the block;
+            # anything else may name one that was never finalized.
+            self._record_candidate(
+                slot_data,
+                candidate,
+                accepted=isinstance(event, Consensus_stats_blockAccepted),
+            )
 
         label = TARGET_TO_LABEL[type(event)]
         ev = EventData(
@@ -266,10 +291,6 @@ class ParserSessionStats(GroupParser):
                     slot_data.block_id_ext = format_block_id(id_)
                 case None:
                     assert False
-            assert event.id is not None
-
-            slot_data.candidate_id = format_candidate_id(event.id)
-
             match event.parent:
                 case Consensus_candidateParent(id=id_):
                     assert id_ is not None
@@ -337,6 +358,9 @@ class ParserSessionStats(GroupParser):
             assert vote.id is not None
             slot = vote.id.slot
 
+            observed = self._get_create_slot(slot, v_group)
+            observed.slot_start_est_ms = min(t_ms, observed.slot_start_est_ms)
+            self._record_candidate(observed, vote.id, accepted=False)
             label = (
                 "notarize_observed"
                 if isinstance(vote, Consensus_simplex_notarizeVote)
@@ -395,6 +419,9 @@ class ParserSessionStats(GroupParser):
         slot_id = (v_group, slot)
         slot_data = self._get_create_slot(slot, v_group)
         slot_data.slot_start_est_ms = min(t_ms, slot_data.slot_start_est_ms)
+        if not isinstance(vote, Consensus_simplex_skipVote):
+            assert vote.id is not None
+            self._record_candidate(slot_data, vote.id, accepted=False)
         vote_type = {
             Consensus_simplex_notarizeVote: "notarize_vote",
             Consensus_simplex_finalizeVote: "finalize_vote",
@@ -447,6 +474,10 @@ class ParserSessionStats(GroupParser):
 
     def _infer_slot_phases(self):
         for slot_id, slot_data in self._slots.items():
+            if math.isinf(slot_data.slot_start_est_ms):
+                # Nothing ever timestamped this slot; an infinite estimate is
+                # worse than none, it poisons every consumer that sorts by time.
+                continue
             self._events.append(
                 EventData(
                     valgroup_id=slot_data.valgroup_id,

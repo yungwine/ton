@@ -6,10 +6,14 @@ from pathlib import Path
 
 from consensus_explorer.cached_parser import CachedGroupParser
 from consensus_explorer.file_index import FileIndex
-from consensus_explorer.parser.parser_session_stats import ParserSessionStats
+from consensus_explorer.parser.parser_session_stats import (
+    ParserSessionStats,
+    format_candidate_id,
+)
 from consensus_explorer.visualizer.figure_builder import FigureBuilder
 from tonapi.ton_api import (
     Consensus_candidateId,
+    Consensus_simplex_notarizeVote,
     Consensus_simplex_skipVote,
     Consensus_simplex_stats_certObserved,
     Consensus_stats_blockAccepted,
@@ -18,6 +22,8 @@ from tonapi.ton_api import (
     Consensus_stats_events,
     Consensus_stats_id,
     Consensus_stats_timestampedEvent,
+    Consensus_stats_validationFinished,
+    Consensus_stats_validationStarted,
 )
 
 # Vendored session-stats logs from a 2-node local network (see test_basic.py).
@@ -333,3 +339,71 @@ def test_a_collator_outside_the_validator_set_is_not_recorded_as_collator():
 
     # Slot 52 is led by 52 // 4 % 23 == 13, and that must survive.
     assert parser._slots[(v_group, 52)].collator == 13
+
+
+def test_candidate_id_comes_from_any_event_that_names_one():
+    """Only the collating node emits candidateReceived.
+
+    Every other event naming a candidate carries the same {slot, hash}, so
+    taking the id only from candidateReceived leaves it blank for most slots.
+    """
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+    v_group = "test_group"
+    other = Consensus_candidateId(slot=7, hash=b"\xaa" * 32)
+
+    parser._parse_stats_event(
+        Consensus_stats_blockAccepted(id=other), t_ms=1000.0, v_group=v_group, v_id="ton-coll-01"
+    )
+
+    assert parser._slots[(v_group, 7)].candidate_id == format_candidate_id(other)
+
+
+def test_the_accepted_candidate_wins_over_a_merely_seen_one():
+    """A candidate can be proposed and never finalized; blockAccepted names the
+    one that actually became the block."""
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+    v_group = "test_group"
+    proposed = Consensus_candidateId(slot=9, hash=b"\x11" * 32)
+    accepted = Consensus_candidateId(slot=9, hash=b"\x22" * 32)
+
+    parser._parse_stats_event(
+        Consensus_stats_validationStarted(id=proposed), t_ms=1000.0, v_group=v_group, v_id=0
+    )
+    assert parser._slots[(v_group, 9)].candidate_id == format_candidate_id(proposed)
+
+    parser._parse_stats_event(
+        Consensus_stats_blockAccepted(id=accepted), t_ms=2000.0, v_group=v_group, v_id=0
+    )
+    assert parser._slots[(v_group, 9)].candidate_id == format_candidate_id(accepted)
+
+    # And a later non-authoritative sighting must not undo it.
+    parser._parse_stats_event(
+        Consensus_stats_validationFinished(id=proposed), t_ms=3000.0, v_group=v_group, v_id=0
+    )
+    assert parser._slots[(v_group, 9)].candidate_id == format_candidate_id(accepted)
+
+
+def test_an_observed_certificate_creates_and_timestamps_its_slot():
+    """A notarize/finalize certificate proves a block existed in that slot.
+
+    Only skip votes used to create the slot, so slots seen purely through an
+    observed certificate were missing entirely -- and creating one without
+    stamping its time leaves slot_start_est_ms at infinity, which poisons
+    anything that sorts by time.
+    """
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+    v_group = "test_group"
+    candidate = Consensus_candidateId(slot=12, hash=b"\x33" * 32)
+    vote = Consensus_simplex_notarizeVote(id=candidate)
+
+    parser._parse_cert_observed(
+        Consensus_simplex_stats_certObserved(vote=vote),
+        t_ms=5000.0,
+        v_group=v_group,
+        v_id="ton-coll-01",
+        get_slot_leader=lambda _s: 0,
+    )
+
+    slot_data = parser._slots[(v_group, 12)]
+    assert slot_data.slot_start_est_ms == 5000.0
+    assert slot_data.candidate_id == format_candidate_id(candidate)

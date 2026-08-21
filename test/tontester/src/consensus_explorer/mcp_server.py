@@ -140,6 +140,10 @@ class SlotOut:
     slot: int
     is_empty: bool
     slot_start_est_ms: float
+    # {slot, hash} of the candidate this slot carried. Present for every slot
+    # any node reported on; block_id needs the collating node's own report and
+    # is therefore much sparser.
+    candidate_id: str | None
     block_id: str | None
     parent_block: str | None
     collator: int | str | None
@@ -337,6 +341,7 @@ def _slot_out(s: SlotData, *, time_stats: bool, validation_time_stats: bool) -> 
         slot=s.slot,
         is_empty=s.is_empty,
         slot_start_est_ms=s.slot_start_est_ms,
+        candidate_id=s.candidate_id,
         block_id=s.block_id(),
         parent_block=s.parent_block,
         collator=s.collator,
