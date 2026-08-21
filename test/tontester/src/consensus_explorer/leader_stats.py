@@ -2,7 +2,6 @@ import argparse
 import enum
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast, final
@@ -275,19 +274,6 @@ class LeaderStatsAnalyzer:
         return agg
 
 
-def _parse_parent_slot(parent_block: str | None) -> int | None:
-    """Extract slot number from a parent_block string like '{42, base64hash}'.
-
-    Returns None for genesis or missing parent data.
-    """
-    if parent_block is None or parent_block == "genesis":
-        return None
-    m = re.match(r"\{(\d+),", parent_block)
-    if m is None:
-        return None
-    return int(m.group(1))
-
-
 def walk_finalized_chains(
     directly_finalized: set[int],
     group_slots: dict[int, SlotData],
@@ -319,7 +305,7 @@ def walk_finalized_chains(
             if sd is None:
                 break
 
-            parent_slot = _parse_parent_slot(sd.parent_block)
+            parent_slot = sd.parent_slot()
 
             if sd.parent_block == "genesis":
                 for s in range(current):

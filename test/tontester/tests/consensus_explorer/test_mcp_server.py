@@ -660,16 +660,34 @@ async def test_group_health_separates_chain_progress_from_log_coverage():
 
 
 @pytest.mark.asyncio
-async def test_group_health_measures_the_gap_between_finalized_blocks():
+async def test_a_gap_spanning_unobserved_blocks_is_not_timed():
+    """Slots 1 and 4 are neighbours in our data but not in the chain.
+
+    Slot 4 builds on slot 2, so the 2900ms between them covers a block we did
+    not observe. Timing it would report missing data as a stall.
+    """
     health = _health(
         await _build().call_tool("group_health", {"valgroup_name": GROUP_A.valgroup_name})
     )
 
+    assert health.block_interval is None
+    assert health.unmeasured_block_gaps == 1
+
+
+@pytest.mark.asyncio
+async def test_group_health_times_chain_adjacent_blocks():
+    health = _health(
+        await _build_late_start().call_tool(
+            "group_health", {"valgroup_name": GROUP_C.valgroup_name}
+        )
+    )
+
+    # Slots 20..27 each build on the one before, one second apart.
+    assert health.unmeasured_block_gaps == 0
     assert health.block_interval is not None
-    # Candidates at slot 1 (1000) and slot 4 (3900): one gap of 2900ms.
-    assert health.block_interval.count == 1
-    assert health.block_interval.min_ms == 2900.0
-    assert health.block_interval.max_between == [1, 4]
+    assert health.block_interval.count == 7
+    assert health.block_interval.min_ms == 1000.0
+    assert health.block_interval.max_ms == 1000.0
 
 
 @pytest.mark.asyncio

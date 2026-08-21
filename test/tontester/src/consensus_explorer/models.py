@@ -1,4 +1,5 @@
 import base64
+import re
 from dataclasses import dataclass, field
 
 
@@ -45,6 +46,18 @@ class SlotData:
 
     def block_id(self) -> str | None:
         return self.block_id_ext.split(":")[0] if self.block_id_ext else None
+
+    def parent_slot(self) -> int | None:
+        """Slot of the block this one builds on.
+
+        None at genesis, and None when the parent was never recorded -- which
+        is not the same as "no parent": it means the link is unknown, so two
+        slots either side of it are not necessarily consecutive blocks.
+        """
+        if self.parent_block is None or self.parent_block == "genesis":
+            return None
+        m = re.match(r"\{(\d+),", self.parent_block)
+        return int(m.group(1)) if m else None
 
 
 @dataclass

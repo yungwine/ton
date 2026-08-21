@@ -242,7 +242,13 @@ class SlotTimings:
 
 @dataclass(frozen=True)
 class BlockInterval:
-    """Gap between consecutive finalized blocks, by first candidate_received."""
+    """Gap between consecutive finalized blocks, by first candidate_received.
+
+    Only pairs the chain actually links are measured -- the later block's
+    parent must be the earlier one. Where blocks were produced but not
+    observed, the two slots either side of the hole are not consecutive, and
+    timing them would report our missing data as a chain stall.
+    """
 
     count: int
     min_ms: float
@@ -272,6 +278,11 @@ class GroupHealth:
     skip_observed_slots: list[int]
     slot_lists_truncated: bool
     block_interval: BlockInterval | None
+    # Consecutive observed finalized blocks that the chain does not link
+    # directly, so the gap between them spans blocks we never saw and cannot be
+    # timed. Large next to block_interval.count means a thin sample; nonzero
+    # with block_interval null means nothing was measurable at all.
+    unmeasured_block_gaps: int
 
 
 def _utc(ts: float) -> str:
@@ -842,9 +853,13 @@ def build_server(networks: Mapping[str, Network]) -> MCPServer:
         third of its validators has a large gap.
 
         `block_interval` is the wall-clock gap between consecutive finalized
-        blocks, measured from the first `candidate_received` of each -- the
-        block rate as observed. Slot lists are capped by `max_slot_list`; the
-        counts are always complete.
+        blocks, measured from the first `candidate_received` of each. Only
+        blocks the chain directly links are timed, so a hole in coverage is not
+        reported as a stall; `unmeasured_block_gaps` counts the pairs skipped
+        for that reason. Large next to the interval count means a thin sample,
+        and nonzero with a null interval means nothing was measurable at all.
+        Slot lists are capped by `max_slot_list`; the counts are always
+        complete.
         """
         net = pick(network)
         v = view(net, valgroup_name)
@@ -882,12 +897,17 @@ def build_server(networks: Mapping[str, Network]) -> MCPServer:
         )
 
         # Gap between consecutive finalized blocks, by when their candidate was
-        # first seen; slots whose candidate we never saw drop out of the chain.
+        # first seen. Adjacent in this list is not adjacent in the chain: with
+        # partial coverage the neighbours can have unobserved blocks between
+        # them, so require the parent link before timing a pair.
         stamped = [(s, t) for s in finalized_slots if (t := v.first_candidate_ms(s)) is not None]
-        deltas = [
-            (prev_slot, slot, t - prev_t)
-            for (prev_slot, prev_t), (slot, t) in zip(stamped, stamped[1:])
-        ]
+        deltas: list[tuple[int, int, float]] = []
+        unlinked = 0
+        for (prev_slot, prev_t), (slot, t) in zip(stamped, stamped[1:]):
+            if v.slots[slot].parent_slot() != prev_slot:
+                unlinked += 1
+                continue
+            deltas.append((prev_slot, slot, t - prev_t))
         interval = None
         if deltas:
             shortest = min(deltas, key=lambda d: d[2])
@@ -929,6 +949,7 @@ def build_server(networks: Mapping[str, Network]) -> MCPServer:
                 or len(skip_observed_slots) > max_slot_list
             ),
             block_interval=interval,
+            unmeasured_block_gaps=unlinked,
         )
 
     return server

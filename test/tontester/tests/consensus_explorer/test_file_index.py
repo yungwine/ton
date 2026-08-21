@@ -307,19 +307,30 @@ def test_read_only_index_invalidates_groups_of_removed_files(
     stats_dir.mkdir()
     db_path = tmp_path / "index.db"
     file_a = stats_dir / "a.log"
+    file_b = stats_dir / "b.log"
     _ = file_a.write_text("first")
+    _ = file_b.write_text("second")
 
-    writer = _writer_index(stats_dir, db_path, monkeypatch, {file_a.resolve(): {b"g-a"}})
+    groups = {file_a.resolve(): {b"g-a"}, file_b.resolve(): {b"g-b"}}
+    writer = _writer_index(stats_dir, db_path, monkeypatch, groups)
     with writer._connect() as conn:
-        _ = writer._index_file(file_a, conn, 0, 1)
+        _ = writer._index_file(file_a, conn, 0, 2)
 
     callback = RecordingCallback()
     reader = FileIndex(stats_dir, db_path, read_only=True, poll_interval_seconds=0.01)
     reader.install_callback(callback)
 
     with reader:
-        assert _wait_for(lambda: reader.get_all_groups() != [])
+        # The poll takes its baseline snapshot on its own thread, so a change
+        # made too early is absorbed into that baseline and never reported.
+        # Land one change first and wait for it: that proves the baseline
+        # exists before the removal under test.
+        with writer._connect() as conn:
+            _ = writer._index_file(file_b, conn, 1, 2)
+        assert _wait_for(lambda: callback.batches != [])
+        seen = len(callback.batches)
+
         with writer._connect() as conn:
             _ = writer._remove_file(file_a, conn)
-        assert _wait_for(lambda: callback.batches != [])
-        assert set().union(*callback.batches) == {b"g-a"}
+        assert _wait_for(lambda: len(callback.batches) > seen)
+        assert b"g-a" in set().union(*callback.batches[seen:])

@@ -247,12 +247,18 @@ class DashApp:
             for slot in finalized_block_slots
             if slot in min_candidate_received_by_slot
         ]
-        delta_entries = [
-            (prev_slot, cur_slot, cur_t - prev_t)
-            for (prev_slot, prev_t), (cur_slot, cur_t) in zip(
-                finalized_with_candidate_received, finalized_with_candidate_received[1:]
-            )
-        ]
+        # Adjacent here is not adjacent in the chain: with partial coverage the
+        # neighbours can have unobserved blocks between them, and timing such a
+        # pair reports our missing data as a stall. Require the parent link.
+        delta_entries: list[tuple[int, int, float]] = []
+        unlinked_deltas = 0
+        for (prev_slot, prev_t), (cur_slot, cur_t) in zip(
+            finalized_with_candidate_received, finalized_with_candidate_received[1:]
+        ):
+            if group_slots[cur_slot].parent_slot() != prev_slot:
+                unlinked_deltas += 1
+                continue
+            delta_entries.append((prev_slot, cur_slot, cur_t - prev_t))
 
         avg_delta = (
             (sum(x[2] for x in delta_entries) / len(delta_entries)) if delta_entries else None
@@ -273,7 +279,11 @@ class DashApp:
                 f"group start estimate = {group_start_est}",
                 f"slots with skip_observed ({len(skip_slots)}) = {skip_slots}",
                 f"slots with empty blocks ({len(empty_block_slots)}) = {empty_block_slots}",
-                "delta between minimum candidate_received for neighboring finalized blocks:",
+                (
+                    "delta between minimum candidate_received for chain-adjacent"
+                    f" finalized blocks ({len(delta_entries)} measured,"
+                    f" {unlinked_deltas} skipped as not chain-adjacent):"
+                ),
                 f"min = {round(min_delta_slots[2], 3) if min_delta_slots else 'n/a'} ms for slots {min_slot_text}",
                 f"avg = {avg_delta:.3f} ms" if avg_delta is not None else "avg = n/a",
                 f"max = {round(max_delta_slots[2], 3) if max_delta_slots else 'n/a'} ms for slots {max_slot_text}",
