@@ -281,3 +281,55 @@ def test_observers_do_not_count_towards_validator_coverage():
 
     # Three hosts reported, but only one is in the set of two.
     assert parser._seen_validators["0,0000000000000000.1"] == {1}
+
+
+def _id_event(idx: int, total_validators: int, window: int) -> Consensus_stats_timestampedEvent:
+    return Consensus_stats_timestampedEvent(
+        ts=1.0,
+        event=Consensus_stats_id(
+            workchain=0,
+            shard=0,
+            cc_seqno=1,
+            idx=idx,
+            total_validators=total_validators,
+            weight=0 if idx < 0 else 5,
+            total_weight=100,
+            slots_per_leader_window=window,
+        ),
+    )
+
+
+def test_parse_carries_the_group_reported_params():
+    """The group states its own size; the parser must not drop it.
+
+    Deriving it downstream from observed collators undercounts whenever log
+    coverage is partial, which silently reassigns every leader.
+    """
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+
+    group = parser._process_group_events(b"g", [_id_event(-1, 23, 4)], "ton-coll-01")
+
+    assert parser._total_validators[group.valgroup_name] == 23
+    assert parser._slots_per_leader_window[group.valgroup_name] == 4
+
+
+def test_a_collator_outside_the_validator_set_is_not_recorded_as_collator():
+    """ton-coll-* nodes collate without being in the set (idx -1).
+
+    Writing their host into SlotData.collator both loses the scheduled leader
+    index and poisons any inference that reads the field.
+    """
+    parser = ParserSessionStats([], r"^(.*)$", with_cache=False)
+    v_group = "0,0000000000000000.1"
+    parser._total_validators[v_group] = 23
+    parser._slots_per_leader_window[v_group] = 4
+
+    parser._parse_stats_event(
+        Consensus_stats_collateStarted(target_slot=52),
+        t_ms=1000.0,
+        v_group=v_group,
+        v_id="ton-coll-01",
+    )
+
+    # Slot 52 is led by 52 // 4 % 23 == 13, and that must survive.
+    assert parser._slots[(v_group, 52)].collator == 13

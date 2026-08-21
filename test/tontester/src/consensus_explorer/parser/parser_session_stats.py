@@ -38,7 +38,15 @@ from tonapi.ton_api import (
     ValidatorStats_validatedBlock,
 )
 
-from ..models import ConsensusData, EventData, GroupData, GroupInfo, SlotData, UnnamedGroupInfo
+from ..models import (
+    ConsensusData,
+    EventData,
+    GroupData,
+    GroupInfo,
+    GroupParams,
+    SlotData,
+    UnnamedGroupInfo,
+)
 from .parser_base import GroupParser, split_by_group
 
 type slot_id_type = tuple[str, int]
@@ -234,7 +242,7 @@ class ParserSessionStats(GroupParser):
 
         slot_data.slot_start_est_ms = min(t_ms, slot_data.slot_start_est_ms)
 
-        if isinstance(event, Consensus_stats_collateStarted):
+        if isinstance(event, Consensus_stats_collateStarted) and isinstance(v_id, int):
             slot_data.collator = v_id
 
         label = TARGET_TO_LABEL[type(event)]
@@ -294,7 +302,8 @@ class ParserSessionStats(GroupParser):
                 started_ev = self._collated[old_slot_id].pop("collate_started")
                 started_ev.slot = slot
                 self._collated.setdefault(slot_id, {})["collate_started"] = started_ev
-            slot_data.collator = v_id
+            if isinstance(v_id, int):
+                slot_data.collator = v_id
 
     def _parse_cert_observed(
         self,
@@ -976,8 +985,19 @@ class ParserSessionStats(GroupParser):
         self._infer_slot_events()
         self._add_cross_shard_markers(all_mc_shard_info)
 
+        group_params = {
+            name: GroupParams(
+                total_validators=total,
+                slots_per_leader_window=self._slots_per_leader_window[name],
+            )
+            for name, total in self._total_validators.items()
+            if name in self._slots_per_leader_window
+        }
         result = ConsensusData(
-            groups=list(groups.values()), slots=list(self._slots.values()), events=self._events
+            groups=list(groups.values()),
+            slots=list(self._slots.values()),
+            events=self._events,
+            group_params=group_params,
         )
 
         if self.with_cache:
@@ -1002,6 +1022,7 @@ class ParserSessionStats(GroupParser):
             groups=[g for g in data.groups if g.valgroup_name == valgroup_name],
             slots=[s for s in data.slots if s.valgroup_id == valgroup_name],
             events=[e for e in data.events if e.valgroup_id == valgroup_name],
+            group_params={k: v for k, v in data.group_params.items() if k == valgroup_name},
         )
 
     @override

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from ..models import ConsensusData, EventData, GroupData, SlotData
+from ..models import ConsensusData, EventData, GroupData, GroupParams, SlotData
 
 
 class GroupParser(ABC):
@@ -43,7 +43,16 @@ def split_by_group(data: ConsensusData, valgroup_names: Sequence[str]) -> dict[s
         if bucket_events is not None:
             bucket_events.append(e)
 
+    params: dict[str, dict[str, GroupParams]] = {
+        name: ({name: p} if (p := data.group_params.get(name)) is not None else {})
+        for name in groups
+    }
     return {
-        name: ConsensusData(groups=groups[name], slots=slots[name], events=events[name])
+        name: ConsensusData(
+            groups=groups[name],
+            slots=slots[name],
+            events=events[name],
+            group_params=params[name],
+        )
         for name in groups
     }

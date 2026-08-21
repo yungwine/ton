@@ -1,5 +1,5 @@
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,20 @@ class EventData:
         return SYMBOL_MAP.get(self.kind, "circle")
 
 
+@dataclass(frozen=True)
+class GroupParams:
+    """What a group reports about itself in its consensus.stats.id event."""
+
+    total_validators: int
+    slots_per_leader_window: int
+
+
 @dataclass
 class ConsensusData:
     groups: list[GroupData]
     slots: list[SlotData]
     events: list[EventData]
+    # valgroup_name -> the group's own reported parameters. Authoritative:
+    # deriving them from observed collators undercounts whenever log coverage
+    # is partial, and silently mis-assigns every leader.
+    group_params: dict[str, GroupParams] = field(default_factory=dict)

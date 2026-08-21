@@ -20,7 +20,14 @@ from consensus_explorer.mcp_server import (
     ValidationTiming,
     build_server,
 )
-from consensus_explorer.models import ConsensusData, EventData, GroupData, GroupInfo, SlotData
+from consensus_explorer.models import (
+    ConsensusData,
+    EventData,
+    GroupData,
+    GroupInfo,
+    GroupParams,
+    SlotData,
+)
 from consensus_explorer.parser.parser_base import GroupParser
 from consensus_explorer.validator_set_info import ValidatorSetInfoProvider
 from mcp.server import MCPServer
@@ -885,3 +892,69 @@ async def test_every_group_bearing_response_carries_its_network():
         ).network
         == "mainnet"
     )
+
+
+GROUP_W = GroupInfo(
+    valgroup_hash=b"w",
+    catchain_seqno=857727,
+    workchain=0,
+    shard=0x8000000000000000,
+    group_start_est=4000.0,
+)
+
+
+def _wide_group_data(with_params: bool) -> ConsensusData:
+    """23 validators, window 4, skip certificates on slots 52-55.
+
+    Mirrors mainnet 0,8000000000000000.857727: the contributing hosts are
+    collator nodes outside the validator set, so most slots carry no observed
+    collator and inference sees only a handful of distinct ones.
+    """
+    name = GROUP_W.valgroup_name
+    slots: list[SlotData] = []
+    for s in range(57):
+        parent = "genesis" if s == 0 else f"{{{51 if s == 56 else s - 1}, x}}"
+        sd = _slot(name, s, 0, parent)
+        # Only a few slots ever get an observed collator, as on the real group.
+        sd.collator = (s // 4) % 23 if s < 12 else None
+        slots.append(sd)
+    events = [
+        EventData(valgroup_id=name, slot=56, label="finalize_reached", kind="reached", t_ms=5600.0)
+    ]
+    return ConsensusData(
+        groups=[GROUP_W],
+        slots=slots,
+        events=events,
+        group_params={name: GroupParams(total_validators=23, slots_per_leader_window=4)}
+        if with_params
+        else {},
+    )
+
+
+def test_group_size_comes_from_the_group_not_from_observed_collators():
+    name = GROUP_W.valgroup_name
+    parser = FakeParser([GROUP_W], {name: _wide_group_data(with_params=True)})
+
+    stats = LeaderStatsAnalyzer(parser).analyze_group(name)
+
+    assert stats is not None
+    assert stats.total_validators == 23
+    assert stats.slots_per_leader_window == 4
+    # Slots 52-55 were skipped over; 52 // 4 % 23 == 13, so they are one
+    # validator's fault, not seven validators'.
+    by_idx = {v.validator_idx: v for v in stats.validators}
+    assert by_idx[13].skipped == 4
+    assert sum(v.skipped for v in stats.validators) == 4
+    assert [i for i, v in by_idx.items() if v.skipped] == [13]
+
+
+def test_without_reported_params_inference_is_the_documented_fallback():
+    """Kept so the fallback stays exercised -- and visibly worse."""
+    name = GROUP_W.valgroup_name
+    parser = FakeParser([GROUP_W], {name: _wide_group_data(with_params=False)})
+
+    stats = LeaderStatsAnalyzer(parser).analyze_group(name)
+
+    assert stats is not None
+    # Inference can only see the collators that were observed.
+    assert stats.total_validators < 23

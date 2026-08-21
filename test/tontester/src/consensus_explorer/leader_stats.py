@@ -115,7 +115,21 @@ class LeaderStatsAnalyzer:
         if not group_slots:
             return None
 
-        total_validators, slots_per_leader_window = _infer_group_params(group_slots)
+        # The group reports its own size; inferring it from observed collators
+        # undercounts whenever coverage is partial and then blames the wrong
+        # validator for every slot. Inference is only a fallback for data with
+        # no consensus.stats.id event.
+        params = data.group_params.get(valgroup_name)
+        if params is not None:
+            total_validators = params.total_validators
+            slots_per_leader_window = params.slots_per_leader_window
+        else:
+            total_validators, slots_per_leader_window = _infer_group_params(group_slots)
+            logger.warning(
+                "No reported params for %s; inferred %s validators from observed collators",
+                valgroup_name,
+                total_validators,
+            )
         if total_validators is None or slots_per_leader_window is None:
             return None
 
@@ -169,9 +183,18 @@ class LeaderStatsAnalyzer:
         # Enrich with ADNL info if available
         if self._vset_provider and isinstance(group_info, GroupInfo):
             try:
-                for idx, ref in self._vset_provider.get_validators(
-                    valgroup_name, data.slots
-                ).items():
+                resolved = self._vset_provider.get_validators(valgroup_name, data.slots)
+                if resolved and len(resolved) != total_validators:
+                    logger.warning(
+                        (
+                            "%s: validator set has %d members but group params say %d;"
+                            " leader attribution will be wrong"
+                        ),
+                        valgroup_name,
+                        len(resolved),
+                        total_validators,
+                    )
+                for idx, ref in resolved.items():
                     if idx in stats_by_validator:
                         stats_by_validator[idx].adnl = ref.adnl
                         stats_by_validator[idx].pub_key_hash = ref.pub_key_hash
