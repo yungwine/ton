@@ -659,35 +659,88 @@ async def test_group_health_separates_chain_progress_from_log_coverage():
     assert (health.first_slot, health.last_slot) == (0, 4)
 
 
-@pytest.mark.asyncio
-async def test_a_gap_spanning_unobserved_blocks_is_not_timed():
-    """Slots 1 and 4 are neighbours in our data but not in the chain.
-
-    Slot 4 builds on slot 2, so the 2900ms between them covers a block we did
-    not observe. Timing it would report missing data as a stall.
-    """
-    health = _health(
-        await _build().call_tool("group_health", {"valgroup_name": GROUP_A.valgroup_name})
-    )
-
-    assert health.block_interval is None
-    assert health.unmeasured_block_gaps == 1
+GROUP_I = GroupInfo(
+    valgroup_hash=b"i",
+    catchain_seqno=11,
+    workchain=0,
+    shard=0x8000000000000000,
+    group_start_est=5000.0,
+)
 
 
-@pytest.mark.asyncio
-async def test_group_health_times_chain_adjacent_blocks():
-    health = _health(
-        await _build_late_start().call_tool(
-            "group_health", {"valgroup_name": GROUP_C.valgroup_name}
+def _interval_data() -> ConsensusData:
+    """Blocks in 0,1,2,4,5,7. Slot 3 is a certified skip; slot 6 is unknown."""
+    name = GROUP_I.valgroup_name
+    parents = {
+        0: "genesis",
+        1: "{0, x}",
+        2: "{1, x}",
+        3: "{2, x}",
+        4: "{2, x}",
+        5: "{4, x}",
+        6: "{5, x}",
+        7: "{5, x}",
+    }
+    slots = [_slot(name, s, s % 2, parents[s]) for s in range(8)]
+    events = [
+        EventData(
+            valgroup_id=name,
+            slot=s,
+            label="finalize_reached",
+            kind="reached",
+            t_ms=float(s) * 1000,
+        )
+        for s in (0, 1, 2, 4, 5, 7)
+    ]
+    events.append(
+        EventData(
+            valgroup_id=name, slot=3, label="skip_observed", kind="local", t_ms=3000.0, validator=0
         )
     )
+    return ConsensusData(
+        groups=[GROUP_I],
+        slots=slots,
+        events=events,
+        group_params={name: GroupParams(total_validators=2, slots_per_leader_window=1)},
+    )
 
-    # Slots 20..27 each build on the one before, one second apart.
-    assert health.unmeasured_block_gaps == 0
+
+def _build_intervals() -> MCPServer:
+    parser = FakeParser([GROUP_I], {GROUP_I.valgroup_name: _interval_data()})
+    return build_server({"mainnet": Network("mainnet", parser, LeaderStatsAnalyzer(parser))})
+
+
+@pytest.mark.asyncio
+async def test_a_certified_skip_still_joins_the_blocks_either_side():
+    """Slot 3 produced nothing and the certificate says so.
+
+    Slots 2 and 4 are therefore consecutive blocks, and the 2000ms between
+    them is a real stall worth reporting -- not a hole in our data.
+    """
+    health = _health(
+        await _build_intervals().call_tool("group_health", {"valgroup_name": GROUP_I.valgroup_name})
+    )
+
     assert health.block_interval is not None
-    assert health.block_interval.count == 7
+    assert health.block_interval.count == 4
     assert health.block_interval.min_ms == 1000.0
-    assert health.block_interval.max_ms == 1000.0
+    assert health.block_interval.max_ms == 2000.0
+    assert health.block_interval.max_between == [2, 4]
+
+
+@pytest.mark.asyncio
+async def test_a_slot_with_no_certificate_either_way_is_undecidable():
+    """Nothing says what slot 6 did, so 5 and 7 may or may not be consecutive.
+
+    Timing that pair would report a block we never saw as a stall.
+    """
+    health = _health(
+        await _build_intervals().call_tool("group_health", {"valgroup_name": GROUP_I.valgroup_name})
+    )
+
+    assert health.unmeasured_block_gaps == 1
+    assert health.block_interval is not None
+    assert health.block_interval.max_between != [5, 7]
 
 
 @pytest.mark.asyncio

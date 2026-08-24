@@ -246,12 +246,12 @@ class SlotTimings:
 
 @dataclass(frozen=True)
 class BlockInterval:
-    """Gap between consecutive finalized blocks, by first candidate_received.
+    """Gap between consecutive finalized blocks, by their finalization certificates.
 
-    Only pairs the chain actually links are measured -- the later block's
-    parent must be the earlier one. Where blocks were produced but not
-    observed, the two slots either side of the hole are not consecutive, and
-    timing them would report our missing data as a chain stall.
+    Two blocks count as consecutive only when every slot between them is
+    certified as having produced nothing. Certificates reach every node, so
+    that holds for the whole group, whereas a block id or a parent link is
+    written only by the node that collated the block.
     """
 
     count: int
@@ -464,14 +464,29 @@ class _GroupView:
 
         self.events_by_slot: dict[int, list[EventData]] = {}
         self.directly_certified: set[int] = set()
+        # Slots a certificate says produced nothing. Certificates reach every
+        # node, so unlike a parent link this is known for the whole group.
+        self.no_block: set[int] = {s.slot for s in data.slots if s.is_empty}
         for e in self.events:
             self.events_by_slot.setdefault(e.slot, []).append(e)
             if e.label == "finalize_reached":
                 self.directly_certified.add(e.slot)
+            elif e.label == "skip_observed":
+                self.no_block.add(e.slot)
 
         # Rule of record for slot fate, shared with group_leader_stats: a
         # certificate finalizes every ancestor it builds on, so walk back.
         self.status = walk_finalized_chains(self.directly_certified, self.slots)
+
+    def consecutive_blocks(self, earlier: int, later: int) -> bool:
+        """Whether two finalized blocks follow one another in the chain.
+
+        Decided from certificates rather than from parent links: if every slot
+        in between is certified as having produced nothing, the two are
+        consecutive. A slot whose fate we do not know makes it undecidable, and
+        the pair is then not counted rather than guessed at.
+        """
+        return all(s in self.no_block for s in range(earlier + 1, later))
 
     def slot_events(self, slot: int) -> list[EventData]:
         return sorted(self.events_by_slot.get(slot, []), key=lambda e: e.t_ms)
@@ -858,11 +873,11 @@ def build_server(networks: Mapping[str, Network]) -> MCPServer:
         third of its validators has a large gap.
 
         `block_interval` is the wall-clock gap between consecutive finalized
-        blocks, measured from the first `candidate_received` of each. Only
-        blocks the chain directly links are timed, so a hole in coverage is not
-        reported as a stall; `unmeasured_block_gaps` counts the pairs skipped
-        for that reason. Large next to the interval count means a thin sample,
-        and nonzero with a null interval means nothing was measurable at all.
+        blocks, timed from their finalization certificates. Two blocks count as
+        consecutive only when every slot between them is certified as having
+        produced nothing, so a block that existed but was not observed cannot
+        be mistaken for a stall. `unmeasured_block_gaps` counts pairs where a
+        slot in between had no certificate either way, leaving it undecidable.
         Slot lists are capped by `max_slot_list`; the counts are always
         complete.
         """
@@ -901,15 +916,19 @@ def build_server(networks: Mapping[str, Network]) -> MCPServer:
             {e.slot for e in v.events if e.label == "skip_observed"} & set(v.slots)
         )
 
-        # Gap between consecutive finalized blocks, by when their candidate was
-        # first seen. Adjacent in this list is not adjacent in the chain: with
-        # partial coverage the neighbours can have unobserved blocks between
-        # them, so require the parent link before timing a pair.
-        stamped = [(s, t) for s in finalized_slots if (t := v.first_candidate_ms(s)) is not None]
+        # Gap between consecutive finalized blocks, timed from their
+        # finalization certificates. Adjacent in this list is not adjacent in
+        # the chain, so every slot in between must be certified as having
+        # produced nothing before the pair is timed.
+        stamped = [
+            (s, t)
+            for s in finalized_slots
+            if (t := v.reached_ms(s, "finalize_reached")) is not None
+        ]
         deltas: list[tuple[int, int, float]] = []
         unlinked = 0
         for (prev_slot, prev_t), (slot, t) in zip(stamped, stamped[1:]):
-            if v.slots[slot].parent_slot() != prev_slot:
+            if not v.consecutive_blocks(prev_slot, slot):
                 unlinked += 1
                 continue
             deltas.append((prev_slot, slot, t - prev_t))

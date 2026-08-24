@@ -234,28 +234,32 @@ class DashApp:
             and group_slots[slot].block_id_ext != "empty"
         )
 
-        min_candidate_received_by_slot: dict[int, float] = {}
+        # Timed from the finalization certificate rather than the first sighting
+        # of the candidate: certificates reach every node, candidates only the
+        # nodes involved in producing them.
+        finalized_at: dict[int, float] = {}
+        no_block: set[int] = {s for s, sd in group_slots.items() if sd.is_empty}
         for e in group_events:
-            if e.label != "candidate_received":
-                continue
-            known_ts = min_candidate_received_by_slot.get(e.slot)
-            if known_ts is None or e.t_ms < known_ts:
-                min_candidate_received_by_slot[e.slot] = e.t_ms
+            if e.label == "finalize_reached":
+                known = finalized_at.get(e.slot)
+                if known is None or e.t_ms < known:
+                    finalized_at[e.slot] = e.t_ms
+            elif e.label == "skip_observed":
+                no_block.add(e.slot)
 
         finalized_with_candidate_received = [
-            (slot, min_candidate_received_by_slot[slot])
-            for slot in finalized_block_slots
-            if slot in min_candidate_received_by_slot
+            (slot, finalized_at[slot]) for slot in finalized_block_slots if slot in finalized_at
         ]
-        # Adjacent here is not adjacent in the chain: with partial coverage the
-        # neighbours can have unobserved blocks between them, and timing such a
-        # pair reports our missing data as a stall. Require the parent link.
+        # Adjacent here is not adjacent in the chain: a block that existed but
+        # was not observed would turn its own gap into an apparent stall. Two
+        # blocks count as consecutive only when every slot between them is
+        # certified as having produced nothing.
         delta_entries: list[tuple[int, int, float]] = []
         unlinked_deltas = 0
         for (prev_slot, prev_t), (cur_slot, cur_t) in zip(
             finalized_with_candidate_received, finalized_with_candidate_received[1:]
         ):
-            if group_slots[cur_slot].parent_slot() != prev_slot:
+            if not all(s in no_block for s in range(prev_slot + 1, cur_slot)):
                 unlinked_deltas += 1
                 continue
             delta_entries.append((prev_slot, cur_slot, cur_t - prev_t))
@@ -280,9 +284,9 @@ class DashApp:
                 f"slots with skip_observed ({len(skip_slots)}) = {skip_slots}",
                 f"slots with empty blocks ({len(empty_block_slots)}) = {empty_block_slots}",
                 (
-                    "delta between minimum candidate_received for chain-adjacent"
-                    f" finalized blocks ({len(delta_entries)} measured,"
-                    f" {unlinked_deltas} skipped as not chain-adjacent):"
+                    "delta between finalization of consecutive blocks"
+                    f" ({len(delta_entries)} measured,"
+                    f" {unlinked_deltas} undecidable):"
                 ),
                 f"min = {round(min_delta_slots[2], 3) if min_delta_slots else 'n/a'} ms for slots {min_slot_text}",
                 f"avg = {avg_delta:.3f} ms" if avg_delta is not None else "avg = n/a",
