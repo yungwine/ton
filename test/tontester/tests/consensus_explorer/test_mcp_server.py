@@ -3,6 +3,7 @@
 # funnelled through the TypeAdapters below, which is where it gets typed.
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import final, override
 
 import pytest
@@ -726,6 +727,61 @@ async def test_a_certified_skip_still_joins_the_blocks_either_side():
     assert health.block_interval.min_ms == 1000.0
     assert health.block_interval.max_ms == 2000.0
     assert health.block_interval.max_between == [2, 4]
+
+
+GROUP_E = GroupInfo(
+    valgroup_hash=b"e",
+    catchain_seqno=12,
+    workchain=0,
+    shard=0x8000000000000000,
+    group_start_est=6000.0,
+)
+
+
+def _empty_block_data() -> ConsensusData:
+    """Blocks in 0 and 3. Slots 1 and 2 finalized an empty candidate."""
+    name = GROUP_E.valgroup_name
+    slots = [_slot(name, s, s % 2, "genesis" if s == 0 else "{0, x}") for s in range(4)]
+    slots[1] = replace(slots[1], block_id_ext="empty")
+    slots[2] = replace(slots[2], block_id_ext="empty")
+    events = [
+        EventData(
+            valgroup_id=name,
+            slot=s,
+            label="finalize_reached",
+            kind="reached",
+            t_ms=float(s) * 1000,
+        )
+        for s in range(4)
+    ]
+    return ConsensusData(
+        groups=[GROUP_E],
+        slots=slots,
+        events=events,
+        group_params={name: GroupParams(total_validators=2, slots_per_leader_window=1)},
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_block_joins_the_blocks_either_side():
+    """Slots 1 and 2 have a finalization certificate but carried no block.
+
+    They are therefore neither endpoints of an interval nor holes in it: 0 and
+    3 are consecutive blocks, and the 3000ms between them is a real stall. A
+    certificate alone does not mean a block was produced.
+    """
+    parser = FakeParser([GROUP_E], {GROUP_E.valgroup_name: _empty_block_data()})
+    server = build_server({"mainnet": Network("mainnet", parser, LeaderStatsAnalyzer(parser))})
+    health = _health(
+        await server.call_tool("group_health", {"valgroup_name": GROUP_E.valgroup_name})
+    )
+
+    assert health.empty_block_slots == [1, 2]
+    assert health.unmeasured_block_gaps == 0
+    assert health.block_interval is not None
+    assert health.block_interval.count == 1
+    assert health.block_interval.max_ms == 3000.0
+    assert health.block_interval.max_between == [0, 3]
 
 
 @pytest.mark.asyncio

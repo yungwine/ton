@@ -238,7 +238,9 @@ class DashApp:
         # of the candidate: certificates reach every node, candidates only the
         # nodes involved in producing them.
         finalized_at: dict[int, float] = {}
-        no_block: set[int] = {s for s, sd in group_slots.items() if sd.is_empty}
+        no_block: set[int] = {
+            s for s, sd in group_slots.items() if sd.is_empty or sd.block_id_ext == "empty"
+        }
         for e in group_events:
             if e.label == "finalize_reached":
                 known = finalized_at.get(e.slot)

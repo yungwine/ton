@@ -464,9 +464,12 @@ class _GroupView:
 
         self.events_by_slot: dict[int, list[EventData]] = {}
         self.directly_certified: set[int] = set()
-        # Slots a certificate says produced nothing. Certificates reach every
-        # node, so unlike a parent link this is known for the whole group.
-        self.no_block: set[int] = {s.slot for s in data.slots if s.is_empty}
+        # Slots known to have produced no block: a skip certificate, or a
+        # candidate that was itself empty. Both are direct evidence, unlike the
+        # SKIPPED classification, which is derived from parent links.
+        self.no_block: set[int] = {
+            s.slot for s in data.slots if s.is_empty or s.block_id_ext == "empty"
+        }
         for e in self.events:
             self.events_by_slot.setdefault(e.slot, []).append(e)
             if e.label == "finalize_reached":
