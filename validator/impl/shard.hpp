@@ -112,7 +112,7 @@ class MasterchainStateQ : public MasterchainState, public ShardStateQ {
   Ref<block::ValidatorSet> get_validator_set(ShardIdFull shard) const override;
   Ref<block::ValidatorSet> get_next_validator_set(ShardIdFull shard) const override;
   Ref<block::ValidatorSet> get_total_validator_set(int next) const override;  // next = -1 -> prev, next = 0 -> cur
-  Ref<block::ValidatorSet> get_validator_set(ShardIdFull shard, CatchainSeqno cc_seqno) const;
+  Ref<block::ValidatorSet> get_validator_set(ShardIdFull shard, CatchainSeqno cc_seqno) const override;
   Ref<block::ValidatorSet> get_next_validator_set(ShardIdFull shard, CatchainSeqno cc_seqno) const;
   bool rotated_all_shards() const override;
   std::vector<Ref<McShardHash>> get_shards() const override;
@@ -137,6 +137,9 @@ class MasterchainStateQ : public MasterchainState, public ShardStateQ {
   NewConsensusConfig get_new_consensus_config(WorkchainId wc) const override {
     return config_->get_new_consensus_config(wc);
   }
+  block::CatchainValidatorsConfig get_catchain_validators_config() const override {
+    return config_->get_catchain_validators_config();
+  }
   block::SizeLimitsConfig::ExtMsgLimits get_ext_msg_limits() const override {
     auto R = config_->get_size_limits_config();
     return R.is_error() ? block::SizeLimitsConfig::ExtMsgLimits() : R.ok_ref().ext_msg_limits;
@@ -147,6 +150,9 @@ class MasterchainStateQ : public MasterchainState, public ShardStateQ {
       return R.ok()->imported_msg_queue;
     }
     return {};
+  }
+  td::Result<block::ValidatorRegistryConfig> get_validator_registry_config() const override {
+    return config_->get_validator_registry_config();
   }
   BlockIdExt last_key_block_id() const override;
   BlockIdExt next_key_block_id(BlockSeqno seqno) const override;

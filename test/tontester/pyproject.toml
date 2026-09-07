@@ -9,6 +9,8 @@ dependencies = [
     "plotly",
     "pytoniq-core",
     "requests",
+    "sortedcontainers",
+    "sortedcontainers-stubs",
     "watchfiles",
 ]
 

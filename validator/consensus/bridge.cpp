@@ -32,15 +32,13 @@ class ManagerFacadeImpl : public ManagerFacade {
       : manager_(manager), validator_set_(std::move(validator_set)), opts_(std::move(opts)) {
   }
 
-  td::actor::Task<GeneratedCandidate> collate_block(CollateParams params,
-                                                    td::CancellationToken cancellation_token) override {
+  td::actor::Task<BlockCandidate> collate_block(CollateParams params,
+                                                td::CancellationToken cancellation_token) override {
     params.validator_set = validator_set_;
     params.collator_opts = opts_->get_collator_options();
-    // TODO: support accelerator (use CollationManager)
     auto [task, promise] = td::actor::StartedTask<BlockCandidate>::make_bridge();
     run_collate_query(std::move(params), manager_, std::move(cancellation_token), std::move(promise));
-    auto candidate = co_await std::move(task);
-    co_return GeneratedCandidate{.candidate = std::move(candidate), .self_collated = true};
+    co_return co_await std::move(task);
   }
 
   td::actor::Task<ValidateCandidateResult> validate_block_candidate(BlockCandidate candidate, ValidateParams params,
@@ -95,8 +93,16 @@ class ManagerFacadeImpl : public ManagerFacade {
                             std::move(data), mode);
   }
 
+  void report_consensus_metrics(metrics::ConsensusMetrics metrics) override {
+    td::actor::send_closure(manager_, &ValidatorManager::add_consensus_metrics, std::move(metrics));
+  }
+
   void update_collator_options(td::Ref<ValidatorManagerOptions> opts) {
     opts_ = std::move(opts);
+  }
+
+  td::actor::Task<double> get_sync_delay() override {
+    co_return co_await td::actor::ask(manager_, &ValidatorManager::get_sync_delay);
   }
 
  private:
@@ -157,7 +163,7 @@ class BlockSyncObserver : public td::actor::SpawnsWith<Bus>, public td::actor::C
   TON_RUNTIME_DEFINE_EVENT_HANDLER();
 
   static bool should_be_spawned(const Bus& bus) {
-    return !bus.is_validator() && bus.config.enable_block_sync();
+    return !bus.is_validator() && !bus.is_collator && bus.config.enable_block_sync();
   }
 
   template <>
@@ -204,6 +210,9 @@ class CandidateBroadcastRelay : public td::actor::SpawnsWith<Bus>, public td::ac
 
     int mode = fullnode::FullNode::broadcast_mode_custom | fullnode::FullNode::broadcast_mode_fast_sync |
                fullnode::FullNode::broadcast_mode_public;
+    if (bus->is_collator) {
+      mode = fullnode::FullNode::broadcast_mode_custom;
+    }
     const auto& block = std::get<BlockCandidate>(event->candidate->block);
     td::actor::send_closure(bus->manager, &ManagerFacade::send_block_candidate_broadcast, block.id, block.data.clone(),
                             mode);
@@ -233,6 +242,8 @@ class BridgeImpl final : public IValidatorGroup {
       bus_.publish<NoncriticalParamsUpdated>(new_noncritical_params);
       current_noncritical_params_ = new_noncritical_params;
     }
+    bus_->validator_opts.store(opts);
+    bus_.publish<ValidatorOptionsUpdated>();
   }
 
   virtual void notify_mc_finalized(BlockIdExt block) override {
@@ -255,8 +266,13 @@ class BridgeImpl final : public IValidatorGroup {
     bus->shard = params_.shard;
     bus->manager = manager_facade_.get();
     bus->keyring = params_.keyring;
-    bus->validator_opts = params_.validator_opts;
-    bus->all_validators = params_.all_validators;
+    bus->validator_opts.store(params_.validator_opts);
+    bus->all_overlay_nodes = params_.all_overlay_nodes;
+    bus->all_current_validators = params_.all_current_validators;
+    bus->is_collator = params_.is_collator;
+    bus->all_collators = params_.all_collators;
+    bus->collator_scoreboard = params_.collator_scoreboard;
+    bus->expected_start_time = params_.expected_start_time;
 
     bool found = false;
     size_t idx = 0;
@@ -315,8 +331,10 @@ class BridgeImpl final : public IValidatorGroup {
     PrivateOverlay::register_in(runtime);
     TraceCollector::register_in(runtime);
     simplex::CandidateResolver::register_in(runtime);
+    simplex::CollatorProducer::register_in(runtime);
     simplex::Consensus::register_in(runtime);
     simplex::Db::register_in(runtime);
+    simplex::MetricReporter::register_in(runtime);
     simplex::Pool::register_in(runtime);
     simplex::StateResolver::register_in(runtime);
 
@@ -358,7 +376,20 @@ class BridgeImpl final : public IValidatorGroup {
   }
 
   td::actor::Task<> resolve_state_and_start(std::vector<BlockIdExt> blocks, BlockIdExt min_mc_block_id) {
-    auto state = co_await ChainState::from_manager(manager_facade_.get(), params_.shard, blocks, min_mc_block_id);
+    Ref<ChainState> state;
+    while (true) {
+      auto r_state =
+          co_await ChainState::from_manager(manager_facade_.get(), params_.shard, blocks, min_mc_block_id).wrap();
+      if (!bus_) {
+        co_return td::Status::Error("validator group already destroyed");
+      }
+      if (r_state.is_error() && r_state.error().code() == ErrorCode::timeout) {
+        LOG(WARNING) << "Failed to resolve chain state: timeout, retrying";
+        continue;
+      }
+      state = CO_TRY(std::move(r_state));
+      break;
+    }
     start_event_ = std::make_shared<Start>(state);
     bus_.publish(start_event_);
     co_return {};
@@ -400,7 +431,7 @@ class BridgeImpl final : public IValidatorGroup {
 td::actor::ActorOwn<IValidatorGroup> IValidatorGroup::create_bridge(td::Slice name, GroupParams params) {
   auto name_with_seqno =
       std::string(name.begin(), name.end()) + "." + std::to_string(params.validator_set->get_catchain_seqno());
-  return td::actor::create_actor<consensus::BridgeImpl>(name, name_with_seqno, std::move(params));
+  return td::actor::create_actor<consensus::BridgeImpl>(name_with_seqno, name_with_seqno, std::move(params));
 }
 
 }  // namespace ton::validator

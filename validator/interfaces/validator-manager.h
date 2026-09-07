@@ -24,6 +24,7 @@
 #include "block/signature-set.h"
 #include "crypto/vm/db/DynamicBagOfCellsDb.h"
 #include "impl/out-msg-queue-proof.hpp"
+#include "metrics/consensus-metrics.h"
 #include "td/actor/BackpressureQueue.h"
 #include "td/utils/logging.h"
 #include "validator/validator.h"
@@ -81,6 +82,14 @@ struct StorageStatCacheStats {
 };
 
 struct CollationStats {
+  struct ExternalMessages {
+    td::uint32 total;
+    td::uint32 filtered;
+    td::uint32 accepted;
+    td::uint32 skipped_backpressure;
+  };
+
+  ShardIdFull shard{workchainInvalid, 0};
   BlockIdExt block_id{workchainInvalid, 0, 0, RootHash::zero(), FileHash::zero()};
   td::Status status = td::Status::OK();
 
@@ -89,11 +98,19 @@ struct CollationStats {
   double collated_at = -1.0;
   td::uint32 actual_bytes = 0, actual_collated_data_bytes = 0;
   int attempt = 0;
+  // First slot of the producer's leader window; false for collations that cannot know their slot.
+  bool first_in_window = false;
   PublicKeyHash self = PublicKeyHash::zero();
   bool is_validator = false;
   td::uint32 estimated_bytes = 0, gas = 0, lt_delta = 0, estimated_collated_data_bytes = 0;
   int cat_bytes = 0, cat_gas = 0, cat_lt_delta = 0, cat_collated_data_bytes = 0;
   std::string limits_log;
+  // Machine-readable attribution of why this block set its overload bit (feeds shard-split analysis):
+  // 0 = none/normal, 1 = load (a block-limit axis hit soft), 2 = out_msg_queue force-split,
+  // 3 = long_collation, 4 = dispatch_queue.
+  int overload_reason = 0;
+  bool want_split = false;         // the collator's final want_split decision for this block
+  int peak_block_limit_class = 0;  // running-max block_limit_class_ (cat_* only approximates this)
   double total_time = 0.0;
   std::string time_stats;
 
@@ -103,6 +120,11 @@ struct CollationStats {
   td::uint32 ext_msgs_filtered = 0;
   td::uint32 ext_msgs_accepted = 0;
   td::uint32 ext_msgs_rejected = 0;
+  td::uint32 ext_msgs_skipped_backpressure = 0;
+
+  ExternalMessages external_messages() const {
+    return {ext_msgs_total, ext_msgs_filtered, ext_msgs_accepted, ext_msgs_skipped_backpressure};
+  }
 
   td::uint64 old_out_msg_queue_size = 0;
   td::uint64 new_out_msg_queue_size = 0;
@@ -145,6 +167,10 @@ struct CollationStats {
     td::RealCpuTimer::Time create_block;
     td::RealCpuTimer::Time create_collated_data;
     td::RealCpuTimer::Time create_block_candidate;
+    td::RealCpuTimer::Time dispatch_queue;
+    td::RealCpuTimer::Time import_internals;
+    td::RealCpuTimer::Time import_externals;
+    td::RealCpuTimer::Time process_new_msgs;
 
     std::string to_str(bool is_cpu) const {
       return PSTRING() << "total=" << total.get(is_cpu) << " preinit=" << preinit.get(is_cpu)
@@ -158,7 +184,11 @@ struct CollationStats {
                        << " create_shard_state=" << create_shard_state.get(is_cpu)
                        << " create_block=" << create_block.get(is_cpu)
                        << " create_collated_data=" << create_collated_data.get(is_cpu)
-                       << " create_block_candidate=" << create_block_candidate.get(is_cpu);
+                       << " create_block_candidate=" << create_block_candidate.get(is_cpu)
+                       << " dispatch_queue=" << dispatch_queue.get(is_cpu)
+                       << " import_internals=" << import_internals.get(is_cpu)
+                       << " import_externals=" << import_externals.get(is_cpu)
+                       << " process_new_msgs=" << process_new_msgs.get(is_cpu);
     }
   };
   WorkTimeStats work_time;
@@ -189,7 +219,8 @@ struct CollationStats {
         create_tl_object<ton_api::validatorStats_blockLimitsStatus>(
             estimated_bytes, gas, lt_delta, estimated_collated_data_bytes, cat_bytes, cat_gas, cat_lt_delta,
             cat_collated_data_bytes, load_fraction_queue_cleanup, load_fraction_dispatch, load_fraction_internals,
-            load_fraction_externals, load_fraction_new_msgs, limits_log),
+            load_fraction_externals, load_fraction_new_msgs, limits_log, overload_reason, want_split,
+            peak_block_limit_class),
         std::move(block_stats), storage_stat_cache.tl());
   }
 };
@@ -287,6 +318,7 @@ class ValidatorManager : public ValidatorManagerInterface {
   virtual void set_block_state_from_data_bulk(std::vector<td::Ref<BlockData>> blocks,
                                               td::Promise<td::Unit> promise) = 0;
   virtual void get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) = 0;
+  virtual void get_cell_from_cell_db(td::Bits256 hash, td::Promise<td::Ref<vm::DataCell>> promise) = 0;
   virtual void store_persistent_state_file(BlockIdExt block_id, BlockIdExt masterchain_block_id,
                                            PersistentStateType type, td::BufferSlice state,
                                            td::Promise<td::Unit> promise) = 0;
@@ -376,6 +408,9 @@ class ValidatorManager : public ValidatorManagerInterface {
 
   virtual void update_shard_client_state(BlockIdExt masterchain_block_id, td::Promise<td::Unit> promise) = 0;
   virtual void get_shard_client_state(bool from_db, td::Promise<BlockIdExt> promise) = 0;
+  virtual void get_sync_delay(td::Promise<double> promise) {
+    promise.set_error(td::Status::Error("not supported"));
+  }
 
   virtual void update_async_serializer_state(AsyncSerializerState state, td::Promise<td::Unit> promise) = 0;
   virtual void get_async_serializer_state(td::Promise<AsyncSerializerState> promise) = 0;
@@ -420,6 +455,8 @@ class ValidatorManager : public ValidatorManagerInterface {
   virtual void log_collate_query_stats(CollationStats stats) {
   }
   virtual void log_validate_query_stats(ValidationStats stats) {
+  }
+  virtual void add_consensus_metrics(metrics::ConsensusMetrics metrics) {
   }
 
   virtual void add_persistent_state_description(td::Ref<PersistentStateDescription> desc) = 0;

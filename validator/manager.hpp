@@ -28,6 +28,8 @@
 #include "impl/ext-message-pool.hpp"
 #include "interfaces/db.h"
 #include "interfaces/validator-manager.h"
+#include "metrics/block-processing-metrics.h"
+#include "metrics/chain-metrics.h"
 #include "metrics/prometheus-exporter.h"
 #include "quic/quic-sender.h"
 #include "rldp2/rldp.h"
@@ -42,6 +44,7 @@
 #include "td/utils/port/StdStreams.h"
 #include "ton/ton-io.hpp"
 
+#include "collator-scoreboard.hpp"
 #include "manager-init.h"
 #include "queue-size-counter.hpp"
 #include "shard-block-retainer.hpp"
@@ -51,6 +54,7 @@
 #include "storage-stat-cache.hpp"
 #include "token-manager.h"
 #include "validator-group.hpp"
+#include "validator-registry-watcher.hpp"
 
 namespace ton {
 
@@ -302,6 +306,9 @@ class ValidatorManagerImpl : public ValidatorManager {
   td::actor::ActorOwn<ExtMessagePool> ext_message_pool_;
   td::actor::ActorOwn<AppliedExtMessageCleanupActor> applied_ext_message_cleanup_actor_;
 
+  void collect_chain_metrics(metrics::Context ctx);
+  td::actor::Task<> collect_ext_message_pool_metrics(metrics::Context ctx);
+
  private:
   // VALIDATOR GROUPS
   std::unique_ptr<NetworkState> network_state_;
@@ -362,11 +369,15 @@ class ValidatorManagerImpl : public ValidatorManager {
   }
 
   void add_temp_key(PublicKeyHash key, td::Promise<td::Unit> promise) override {
-    validator_keys_.insert(key);
+    if (validator_keys_.insert(key).second) {
+      validator_registry_watchers_[key] =
+          td::actor::create_actor<ValidatorRegistryWatcher>("ValidatorRegistry", key, actor_id(this), keyring_);
+    }
     promise.set_value(td::Unit());
   }
   void del_temp_key(PublicKeyHash key, td::Promise<td::Unit> promise) override {
     validator_keys_.erase(key);
+    validator_registry_watchers_.erase(key);
     promise.set_value(td::Unit());
   }
 
@@ -438,6 +449,7 @@ class ValidatorManagerImpl : public ValidatorManager {
                                  td::Promise<td::Ref<ShardState>> promise) override;
   void set_block_state_from_data_bulk(std::vector<td::Ref<BlockData>> blocks, td::Promise<td::Unit> promise) override;
   void get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) override;
+  void get_cell_from_cell_db(td::Bits256 hash, td::Promise<td::Ref<vm::DataCell>> promise) override;
   void store_persistent_state_file(BlockIdExt block_id, BlockIdExt masterchain_block_id, PersistentStateType type,
                                    td::BufferSlice state, td::Promise<td::Unit> promise) override;
   void store_persistent_state_file_gen(BlockIdExt block_id, BlockIdExt masterchain_block_id, PersistentStateType type,
@@ -551,6 +563,7 @@ class ValidatorManagerImpl : public ValidatorManager {
 
   void update_shard_client_state(BlockIdExt masterchain_block_id, td::Promise<td::Unit> promise) override;
   void get_shard_client_state(bool from_db, td::Promise<BlockIdExt> promise) override;
+  void get_sync_delay(td::Promise<double> promise) override;
 
   void update_async_serializer_state(AsyncSerializerState state, td::Promise<td::Unit> promise) override;
   void get_async_serializer_state(td::Promise<AsyncSerializerState> promise) override;
@@ -593,9 +606,9 @@ class ValidatorManagerImpl : public ValidatorManager {
   td::actor::Task<> start_up_advance_mc();
 
   bool is_validator();
+  bool is_collator();
   bool validating_masterchain();
   PublicKeyHash get_validator(ShardIdFull shard, td::Ref<block::ValidatorSet> val_set);
-  bool is_shard_collator(ShardIdFull shard);
 
   ValidatorManagerImpl(td::Ref<ValidatorManagerOptions> opts, std::string db_root,
                        td::actor::ActorId<keyring::Keyring> keyring, td::actor::ActorId<adnl::Adnl> adnl,
@@ -637,12 +650,8 @@ class ValidatorManagerImpl : public ValidatorManager {
 
   void add_persistent_state_description(td::Ref<PersistentStateDescription> desc) override;
 
-  void add_collator(adnl::AdnlNodeIdShort id, ShardIdFull shard) override;
-  void del_collator(adnl::AdnlNodeIdShort id, ShardIdFull shard) override;
-  void add_out_msg_queue_proof(ShardIdFull dst_shard, td::Ref<OutMsgQueueProof> proof) override;
-
-  void get_collation_manager_stats(
-      td::Promise<tl_object_ptr<ton_api::engine_validator_collationManagerStats>> promise) override;
+  void add_collator(adnl::AdnlNodeIdShort id) override;
+  void del_collator(adnl::AdnlNodeIdShort id) override;
 
   void get_out_msg_queue_size(BlockIdExt block_id, td::Promise<td::uint64> promise) override {
     if (queue_size_counter_.empty()) {
@@ -702,6 +711,10 @@ class ValidatorManagerImpl : public ValidatorManager {
 
  private:
   std::set<PublicKeyHash> validator_keys_;
+  std::map<PublicKeyHash, td::actor::ActorOwn<ValidatorRegistryWatcher>> validator_registry_watchers_;
+  std::set<adnl::AdnlNodeIdShort> local_collator_adnl_ids_;
+  td::actor::ActorOwn<CollatorScoreboard> collator_scoreboard_ =
+      td::actor::create_actor<CollatorScoreboard>("CollatorScoreboard");
 
  private:
   td::Ref<ValidatorManagerOptions> opts_;
@@ -768,13 +781,21 @@ class ValidatorManagerImpl : public ValidatorManager {
 
   UnixTime started_at_ = (UnixTime)td::Clocks::system();
   std::map<int, td::uint64> total_ls_queries_ok_, total_ls_queries_error_;  // lite_api ID -> count, 0 for unknown
-  td::uint64 total_collated_blocks_master_ok_{0}, total_collated_blocks_master_error_{0};
-  td::uint64 total_validated_blocks_master_ok_{0}, total_validated_blocks_master_error_{0};
-  td::uint64 total_collated_blocks_shard_ok_{0}, total_collated_blocks_shard_error_{0};
-  td::uint64 total_validated_blocks_shard_ok_{0}, total_validated_blocks_shard_error_{0};
+  metrics::ChainSnapshot::CollatedBlocks total_collated_blocks_;
+  metrics::ChainSnapshot::Blocks total_validated_blocks_;
+  td::uint64 ext_message_not_ready_{0};
+  metrics::BlockProcessingMetrics block_processing_metrics_;
+  metrics::ConsensusMetrics consensus_metrics_;
 
   void log_collate_query_stats(CollationStats stats) override;
   void log_validate_query_stats(ValidationStats stats) override;
+  void add_consensus_metrics(metrics::ConsensusMetrics metrics) override {
+    consensus_metrics_ += metrics;
+  }
+  void add_collation_external_metrics(metrics::BlockChain chain, metrics::BlockResult result,
+                                      CollationStats::ExternalMessages stats);
+  void add_collation_queue_metrics(metrics::BlockChain chain, const CollationStats &stats);
+  void add_collation_storage_cache_metrics(metrics::BlockChain chain, const StorageStatCacheStats &cache);
 
   void register_stats_provider(
       td::uint64 idx, std::string prefix,

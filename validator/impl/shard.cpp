@@ -349,7 +349,8 @@ td::Status MasterchainStateQ::mc_reinit() {
   auto res = block::ConfigInfo::extract_config(
       root_cell(), blkid,
       block::ConfigInfo::needStateRoot | block::ConfigInfo::needValidatorSet | block::ConfigInfo::needShardHashes |
-          block::ConfigInfo::needPrevBlocks | block::ConfigInfo::needWorkchainInfo);
+          block::ConfigInfo::needPrevBlocks | block::ConfigInfo::needWorkchainInfo |
+          block::ConfigInfo::needAccountsRoot | block::ConfigInfo::needSpecialSmc);
   cur_validators_.reset();
   next_validators_.reset();
   if (res.is_error()) {
@@ -360,7 +361,7 @@ td::Status MasterchainStateQ::mc_reinit() {
 
   cur_validators_ = config_->get_cur_validator_set();
 
-  auto nv_root = config_->get_config_param(37, 36);
+  auto nv_root = config_->get_config_param(36);
   if (nv_root.not_null()) {
     TRY_RESULT(validators, block::Config::unpack_validator_set(std::move(nv_root), true));
     next_validators_ = std::move(validators);

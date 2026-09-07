@@ -20,13 +20,17 @@
 #include <set>
 
 #include "interfaces/validator-manager.h"
+#include "metrics/ext-message-pool-metrics.h"
 #include "td/actor/coro_utils.h"
 #include "td/utils/PersistentTreap.h"
 
+#include "expiry-ordered-list.hpp"
 #include "ext-message-checker.hpp"
 #include "external-message.hpp"
 
 namespace ton::validator {
+
+struct ExtMessagePoolTestPeer;
 
 class ExtMessagePool : public td::actor::Actor {
  public:
@@ -40,9 +44,8 @@ class ExtMessagePool : public td::actor::Actor {
   };
   td::actor::Task<CheckResult> check_add_external_message(td::BufferSlice data, int priority, bool add_to_mempool);
   void install_collator_queue(ShardIdFull shard, std::unique_ptr<ExtMsgCallback> callback);
-  void cleanup_external_messages(ShardIdFull shard);
   void complete_external_messages(std::vector<ExtMessage::Hash> to_delay, std::vector<ExtMessage::Hash> to_delete);
-  void erase_external_messages(std::vector<ExtMessage::Hash> to_delete);
+  void erase_external_messages(BlockIdExt block_id, td::uint64 applied_count, std::vector<ExtMessage::Hash> to_delete);
 
   void update_last_masterchain_state(td::Ref<MasterchainState> state) {
     last_masterchain_state_ = std::move(state);
@@ -52,12 +55,18 @@ class ExtMessagePool : public td::actor::Actor {
   }
   std::vector<std::pair<std::string, std::string>> prepare_stats();
 
+  // Cross the actor boundary with values, not a scrape-local metrics::Context.
+  using MetricsSnapshot = metrics::ExtMessagePoolSnapshot;
+  MetricsSnapshot get_metrics_snapshot();
+
   void alarm() override;
   void start_up() override {
     alarm_timestamp().relax(admission_stats_at_);
   }
 
  private:
+  friend struct ExtMessagePoolTestPeer;
+
   struct MessageId {
     AccountIdPrefixFull dst;
     ExtMessage::Hash hash;
@@ -76,21 +85,31 @@ class ExtMessagePool : public td::actor::Actor {
     }
   };
   struct MempoolMsg {
+    static constexpr double TTL = 600.0;
+
     td::Ref<ExtMessage> message;
     ExtMessage::Hash hash_norm;
+    MempoolMsg *older = nullptr;
+    MempoolMsg *newer = nullptr;
     td::uint32 generation = 0;
     bool active = true;
     td::Timestamp reactivate_at;
-    td::Timestamp delete_at;
+    const td::Timestamp delete_at;
 
     auto address() const {
       return std::make_pair(message->wc(), message->addr());
     }
-    bool is_active() {
+    bool is_active(bool *reactivated = nullptr) {
+      if (reactivated != nullptr) {
+        *reactivated = false;
+      }
       if (!active) {
         if (reactivate_at.is_in_past()) {
           active = true;
           generation++;
+          if (reactivated != nullptr) {
+            *reactivated = true;
+          }
         }
       }
       return active;
@@ -98,18 +117,19 @@ class ExtMessagePool : public td::actor::Actor {
     bool can_postpone() const {
       return generation <= 2;
     }
-    void postpone() {
+    bool postpone() {
       if (!active) {
-        return;
+        return false;
       }
       active = false;
       reactivate_at = td::Timestamp::in(generation * 5.0);
+      return true;
     }
     bool expired() const {
       return delete_at.is_in_past();
     }
-    explicit MempoolMsg(td::Ref<ExtMessage> msg) : message(std::move(msg)), hash_norm(message->hash_norm()) {
-      delete_at = td::Timestamp::in(600);
+    explicit MempoolMsg(td::Ref<ExtMessage> msg)
+        : message(std::move(msg)), hash_norm(message->hash_norm()), delete_at(td::Timestamp::in(TTL)) {
     }
   };
 
@@ -146,11 +166,26 @@ class ExtMessagePool : public td::actor::Actor {
   } checked_ext_msg_counter_;
   td::uint64 total_check_ext_messages_ok_{0}, total_check_ext_messages_error_{0};
   td::uint64 applied_ext_msgs_delete_requests_{0}, applied_ext_msgs_deleted_{0};
+  std::array<td::uint64, static_cast<size_t>(metrics::ExtMessageAdmissionOutcome::count)> admission_outcomes_{};
+  std::array<td::uint64, static_cast<size_t>(metrics::ExtMessageRemovalReason::count)> removal_reasons_{};
+  td::uint64 applied_ext_messages_master_{0}, applied_ext_messages_shard_{0};
+  metrics::ExtMessageStateCounts ext_message_states_;
+  metrics::Histogram<metrics::kExtInclusionBuckets> ext_inclusion_seconds_;
+  detail::ExpiryOrderedList<MempoolMsg> expiry_order_;
 
-  td::Timestamp cleanup_mempool_at_ = td::Timestamp::now();
-
-  void add_message_to_mempool(td::Ref<ExtMessage> message, int priority);
-  bool erase_message(int priority, const MessageId &id);
+  metrics::ExtMessageAdmissionOutcome add_message_to_mempool(td::Ref<ExtMessage> message, int priority,
+                                                             td::Timestamp &alarm);
+  metrics::ExtMessageAdmissionOutcome finalize_admission(td::Ref<ExtMessage> message, int priority, bool add_to_mempool,
+                                                         td::Timestamp &alarm);
+  // `stored_age_seconds`, when given, receives the erased entry's age before it is destroyed.
+  bool erase_message(int priority, MessageId id, double *stored_age_seconds = nullptr);
+  static double stored_age(const MempoolMsg &message);
+  size_t cleanup_expired_messages(td::Timestamp now = td::Timestamp::now());
+  bool prepare_message_for_collation(MempoolMsg *message);
+  void link_message(MempoolMsg *message);
+  void unlink_message(MempoolMsg *message);
+  void record_admission(metrics::ExtMessageAdmissionOutcome outcome);
+  void record_removal(metrics::ExtMessageRemovalReason reason);
 
   // ===== Parallel admission =====
   // The expensive per-message stages (parse, account state fetch, VM check) run on these worker

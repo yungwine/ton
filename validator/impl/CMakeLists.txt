@@ -15,6 +15,7 @@ set(TON_VALIDATOR_SOURCE
   shard.cpp
   top-shard-descr.cpp
   validate-query.cpp
+  ../downloaders/wait-block-data-proof.cpp
 
   accept-block.hpp
   block.hpp
@@ -24,6 +25,7 @@ set(TON_VALIDATOR_SOURCE
   external-message.hpp
   ext-message-checker.hpp
   ext-message-pool.hpp
+  expiry-ordered-list.hpp
   liteserver.hpp
   liteserver-cache.hpp
   message-queue.hpp

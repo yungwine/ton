@@ -482,6 +482,7 @@ void HttpPayload::run_callbacks() {
 }
 
 void HttpPayload::flush() {
+  const std::lock_guard<std::mutex> lock{mutex_};
   is_flushing_ = true;
   for (auto &x : callbacks_) {
     if (state_.load(std::memory_order_relaxed) != ParseState::completed) {
@@ -917,6 +918,9 @@ void answer_error(HttpStatusCode code, std::string reason,
         break;
       case status_bad_gateway:
         reason = "Bad Gateway";
+        break;
+      case status_service_unavailable:
+        reason = "Service Unavailable";
         break;
       case status_gateway_timeout:
         reason = "Gateway Timeout";

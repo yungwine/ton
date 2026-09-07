@@ -78,6 +78,7 @@ Collator::Collator(CollateParams params, td::actor::ActorId<ValidatorManager> ma
                     send_closure(manager, &ValidatorManager::add_perf_timer_stat, "collate", duration);
                   })
     , cancellation_token_(std::move(cancellation_token)) {
+  stats_.shard = shard_;
   if (params_.collator_opts.is_null()) {
     params_.collator_opts = Ref<CollatorOptions>{true};
   }
@@ -356,6 +357,7 @@ bool Collator::fatal_error(td::Status error) {
   error.ensure_error();
   LOG(ERROR) << "cannot generate block candidate for " << show_shard(shard_) << " : " << error.to_string();
   if (busy_) {
+    failed_with_ = error.clone();
     if (allow_repeat_collation_ && error.code() != ErrorCode::cancelled && params_.attempt_idx + 1 < MAX_ATTEMPTS &&
         !params_.is_hardfork && !timeout_.is_in_past()) {
       CollateParams new_params = params_;
@@ -365,9 +367,6 @@ bool Collator::fatal_error(td::Status error) {
     } else {
       LOG(INFO) << "collation failed in " << perf_timer_.elapsed() << " s " << error;
       LOG(INFO) << perf_log_;
-      finalize_stats();
-      stats_.status = error.clone();
-      td::actor::send_closure(manager, &ValidatorManager::log_collate_query_stats, std::move(stats_));
       main_promise.set_error(std::move(error));
     }
     busy_ = false;
@@ -398,6 +397,28 @@ bool Collator::fatal_error(int err_code, std::string err_msg) {
  */
 bool Collator::fatal_error(std::string err_msg, int err_code) {
   return fatal_error(td::Status::Error(err_code, err_msg));
+}
+
+/**
+ * Releases external message resources and reports a failed attempt, if there was one.
+ *
+ * A failed attempt is reported from here rather than from fatal_error() because fatal_error() is
+ * frequently called from inside ScopedRealCpuTimer scopes, which only fold into stats_ once they
+ * unwind; by tear_down() time the whole handler stack is gone, so the failing phase is included.
+ * A retry is a complete failed attempt for observability purposes, and reporting the whole query
+ * preserves its elapsed/real/CPU time, detailed phases and external-message outcomes -- the older
+ * external-only retry report discarded exactly the expensive attempt operators need to diagnose
+ * overload. log_collate_query_stats owns external accounting too, so there is no separate report.
+ */
+void Collator::tear_down() {
+  ext_msg_cancellation_.cancel();
+  ext_msg_queue_.close();
+  if (!failed_with_) {
+    return;
+  }
+  finalize_stats();
+  stats_.status = failed_with_->clone();
+  td::actor::send_closure(manager, &ValidatorManager::log_collate_query_stats, std::move(stats_));
 }
 
 /**
@@ -860,6 +881,18 @@ bool Collator::unpack_last_mc_state() {
     return fatal_error(limits.move_as_error());
   }
   block_limits_ = limits.move_as_ok();
+  if (params_.collator_opts->block_limits_bytes) {
+    block_limits_->bytes = *params_.collator_opts->block_limits_bytes;
+  }
+  if (params_.collator_opts->block_limits_gas) {
+    block_limits_->gas = *params_.collator_opts->block_limits_gas;
+  }
+  if (params_.collator_opts->block_limits_lt_delta) {
+    block_limits_->lt_delta = *params_.collator_opts->block_limits_lt_delta;
+  }
+  if (params_.collator_opts->block_limits_collated_data) {
+    block_limits_->collated_data = *params_.collator_opts->block_limits_collated_data;
+  }
   if (params_.attempt_idx == 3) {
     LOG(INFO) << "Attempt #3: bytes, gas limits /= 2";
     block_limits_->bytes.multiply_by(0.5);
@@ -2012,8 +2045,8 @@ bool Collator::register_shard_block_creators(std::vector<td::Bits256> creator_li
  * @returns True if collation is successful, false otherwise.
  */
 bool Collator::try_collate() {
-  td::ScopedRealCpuTimer timer_total{stats_.work_time.total};
-  td::ScopedRealCpuTimer timer{stats_.work_time.preinit};
+  td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, &stats_.work_time.total};
+  td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.preinit};
   if (!preinit_complete) {
     LOG(WARNING) << "running do_preinit()";
     if (!do_preinit()) {
@@ -2327,7 +2360,7 @@ td::actor::Task<> Collator::do_collate() {
 
 td::actor::Task<> Collator::do_collate_inner() {
   do_collate_started_at_ = td::Timestamp::now();
-  td::ScopedRealCpuTimer timer_total{stats_.work_time.total};
+  td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, &stats_.work_time.total};
   LOG(WARNING) << "do_collate() : start";
   if (!fetch_config_params()) {
     co_return td::Status::Error("cannot fetch required configuration parameters from masterchain state");
@@ -2348,7 +2381,7 @@ td::actor::Task<> Collator::do_collate_inner() {
   }
   // 1.2. delete delivered messages from output queue
   {
-    td::ScopedRealCpuTimer timer{stats_.work_time.queue_cleanup};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.queue_cleanup};
     if (!out_msg_queue_cleanup()) {
       co_return td::Status::Error("cannot scan OutMsgQueue and remove already delivered messages");
     }
@@ -2363,10 +2396,13 @@ td::actor::Task<> Collator::do_collate_inner() {
   if (!init_value_create()) {
     co_return td::Status::Error("cannot compute the value to be created / minted / recovered");
   }
-  // 2-. take messages from dispatch queue
-  LOG(INFO) << "process dispatch queue";
-  if (!process_dispatch_queue()) {
-    co_return td::Status::Error("cannot process dispatch queue");
+  {
+    // 2-. take messages from dispatch queue
+    LOG(INFO) << "process dispatch queue";
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.dispatch_queue};
+    if (!process_dispatch_queue()) {
+      co_return td::Status::Error("cannot process dispatch queue");
+    }
   }
   // 2. tick transactions
   LOG(INFO) << "create tick transactions";
@@ -2382,15 +2418,19 @@ td::actor::Task<> Collator::do_collate_inner() {
     // TODO: implement merge prepare/install transactions for "large" smart contracts
     // ...
   }
-  // 4. import inbound internal messages, process or transit
-  LOG(INFO) << "process inbound internal messages";
-  if (!process_inbound_internal_messages()) {
-    co_return td::Status::Error("cannot process inbound internal messages");
+  {
+    // 4. import inbound internal messages, process or transit
+    LOG(INFO) << "process inbound internal messages";
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.import_internals};
+    if (!process_inbound_internal_messages()) {
+      co_return td::Status::Error("cannot process inbound internal messages");
+    }
   }
-  timer_total.pause();
-  // 5-6. import inbound external messages and process newly created messages (if space&gas left)
-  co_await process_external_and_new_messages();
-  timer_total.resume();
+  {
+    td::ScopedRealCpuTimer::Guard timer{work_timer_total_, nullptr};
+    // 5-6. import inbound external messages and process newly created messages (if space&gas left)
+    co_await process_external_and_new_messages();
+  }
   auto post_ext_token = perf_log_.start_action("post_ext_processing");
   if (before_split_) {
     // 7. split prepare / split install
@@ -2407,7 +2447,7 @@ td::actor::Task<> Collator::do_collate_inner() {
     // 9. process newly-generated messages (only by including them into output queue)
     LOG(INFO) << "enqueue newly-generated messages";
     bool enqueue_only = true;
-    td::ScopedRealCpuTimer timer{stats_.work_time.enqueue_new_messages};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.enqueue_new_messages};
     if (!process_new_messages(enqueue_only)) {
       co_return td::Status::Error("cannot process newly-generated outbound messages");
     }
@@ -2428,13 +2468,13 @@ td::actor::Task<> Collator::do_collate_inner() {
   {
     // A. serialize ShardAccountBlocks and new ShardAccounts
     LOG(DEBUG) << "serialize account states and blocks";
-    td::ScopedRealCpuTimer timer{stats_.work_time.combine_account_transactions};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.combine_account_transactions};
     if (!combine_account_transactions()) {
       co_return td::Status::Error("cannot combine separate Account transactions into a new ShardAccountBlocks");
     }
   }
   {
-    td::ScopedRealCpuTimer timer{stats_.work_time.create_shard_state};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.create_shard_state};
     // B. serialize McStateExtra
     LOG(DEBUG) << "serialize McStateExtra";
     if (!create_mc_state_extra()) {
@@ -2449,14 +2489,14 @@ td::actor::Task<> Collator::do_collate_inner() {
   {
     // D. serialize Block
     LOG(DEBUG) << "serialize Block";
-    td::ScopedRealCpuTimer timer{stats_.work_time.create_block};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.create_block};
     if (!create_block()) {
       co_return td::Status::Error("cannot create new Block");
     }
   }
   {
     // E. create collated data
-    td::ScopedRealCpuTimer timer{stats_.work_time.create_collated_data};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.create_collated_data};
     if (!create_collated_data()) {
       co_return td::Status::Error("cannot create collated data for new Block candidate");
     }
@@ -2464,7 +2504,7 @@ td::actor::Task<> Collator::do_collate_inner() {
   {
     // F. create a block candidate
     LOG(DEBUG) << "create a Block candidate";
-    td::ScopedRealCpuTimer timer{stats_.work_time.create_block_candidate};
+    td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.create_block_candidate};
     if (!create_block_candidate()) {
       co_return td::Status::Error("cannot serialize a new Block candidate");
     }
@@ -2716,7 +2756,7 @@ bool Collator::init_account_storage_dict(block::Account& account) {
   if (storage_dict_hash.is_zero()) {
     return true;
   }
-  td::ScopedRealCpuTimer timer{stats_.work_time.prelim_storage_stat};
+  td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.prelim_storage_stat};
   td::Ref<vm::Cell> cached_dict_root =
       storage_stat_cache_ ? storage_stat_cache_(storage_dict_hash) : td::Ref<vm::Cell>{};
   if (cached_dict_root.not_null()) {
@@ -2892,8 +2932,7 @@ static td::Ref<vm::Cell> clean_usage_cells(td::Ref<vm::Cell> old_root, td::Ref<v
  * @returns True if the operation is successful, false otherwise.
  */
 bool Collator::process_account_storage_dict(block::Account& account) {
-  td::ScopedRealCpuTimer timer{stats_.work_time.final_storage_stat};
-  td::ScopedRealCpuTimer timer2{stats_.work_time.combine_account_transactions, -1.0};
+  td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.final_storage_stat};
   bool store_dict_to_cache = account.storage_dict_hash && account.account_storage_stat &&
                              account.account_storage_stat.value().is_dict_ready() &&
                              account.storage_used.cells >= StorageStatCache::MIN_ACCOUNT_CELLS;
@@ -3202,12 +3241,12 @@ bool Collator::create_ticktock_transaction(const ton::StdSmcAddress& smc_addr, t
   std::unique_ptr<block::transaction::Transaction> trans = std::make_unique<block::transaction::Transaction>(
       *acc, mask == 2 ? block::transaction::Transaction::tr_tick : block::transaction::Transaction::tr_tock,
       req_start_lt, now_);
-  td::RealCpuTimer timer;
   SCOPE_EXIT {
     stats_.work_time.trx_tvm += trans->time_tvm;
     stats_.work_time.trx_storage_stat += trans->time_storage_stat;
-    stats_.work_time.trx_other += timer.elapsed_both() - trans->time_tvm - trans->time_storage_stat;
+    stats_.work_time.trx_other -= trans->time_tvm + trans->time_storage_stat;
   };
+  td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.trx_other};
   if (!trans->prepare_storage_phase(storage_phase_cfg_, true)) {
     return fatal_error(td::Status::Error(
         -666, std::string{"cannot create storage phase of a new transaction for smart contract "} + smc_addr.to_hex()));
@@ -3311,8 +3350,13 @@ Ref<vm::Cell> Collator::create_ordinary_transaction(Ref<vm::Cell> msg_root,
     after_lt = std::max(after_lt, it->second);
   }
   set_current_tx_storage_dict(*acc);
-  auto res = impl_create_ordinary_transaction(msg_root, acc, now_, start_lt, &storage_phase_cfg_, &compute_phase_cfg_,
-                                              &action_phase_cfg_, &serialize_cfg_, external, after_lt, &stats_);
+  td::Result<std::unique_ptr<block::transaction::Transaction>> res;
+  {
+    td::ScopedRealCpuTimer::Guard timer{work_timer_,
+                                        nullptr};  // trx time is updated in impl_reate_ordinary_transaction
+    res = impl_create_ordinary_transaction(msg_root, acc, now_, start_lt, &storage_phase_cfg_, &compute_phase_cfg_,
+                                           &action_phase_cfg_, &serialize_cfg_, external, after_lt, &stats_);
+  }
   if (res.is_error()) {
     auto error = res.move_as_error();
     if (error.code() == -701) {
@@ -4165,7 +4209,7 @@ bool Collator::process_inbound_internal_messages() {
  * Processes inbound external messages and new internal messages.
  */
 td::actor::Task<> Collator::process_external_and_new_messages() {
-  td::ScopedRealCpuTimer timer_total{stats_.work_time.total};
+  td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, &stats_.work_time.total};
   if (out_msg_queue_size_ > SKIP_EXTERNALS_QUEUE_SIZE) {
     LOG(INFO) << "skipping processing of inbound external messages (except for high-priority) because out_msg_queue is "
                  "too big ("
@@ -4175,16 +4219,20 @@ td::actor::Task<> Collator::process_external_and_new_messages() {
   while (true) {
     // 5. import inbound external messages (if space&gas left)
     LOG(INFO) << "process inbound external messages";
-    timer_total.pause();
-    if (!co_await process_inbound_external_messages()) {
-      co_return td::Status::Error("cannot process inbound external messages");
+    {
+      td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, nullptr};
+      if (!co_await process_inbound_external_messages()) {
+        co_return td::Status::Error("cannot process inbound external messages");
+      }
     }
-    timer_total.resume();
     // 6. process newly-generated messages (if space&gas left)
     //    (if we were unable to process all inbound messages, all new messages must be queued)
     LOG(INFO) << "process newly-generated messages";
-    if (!process_new_messages(enqueue_only)) {
-      co_return td::Status::Error("cannot process newly-generated outbound messages");
+    {
+      td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.process_new_msgs};
+      if (!process_new_messages(enqueue_only)) {
+        co_return td::Status::Error("cannot process newly-generated outbound messages");
+      }
     }
     if (!params_.wait_externals_until || params_.wait_externals_until.is_in_past()) {
       LOG(INFO) << "Don't wait for new external messages";
@@ -4198,15 +4246,16 @@ td::actor::Task<> Collator::process_external_and_new_messages() {
       LOG(INFO) << "MEDIUM LIMIT is reached, don't wait for new external messages";
       break;
     }
-    timer_total.pause();
-    LOG(INFO) << "Waiting for new external messages (" << params_.wait_externals_until.in() << "s)";
-    td::Timer wait_timer;
-    auto S = co_await wait_for_external_message(params_.wait_externals_until).wrap();
-    wait_externals_total_time_ += wait_timer.elapsed();
-    timer_total.resume();
-    if (S.is_error()) {
-      LOG(INFO) << "No new external messages appeared before timeout";
-      break;
+    {
+      LOG(INFO) << "Waiting for new external messages (" << params_.wait_externals_until.in() << "s)";
+      td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, nullptr};
+      td::Timer wait_timer;
+      auto S = co_await wait_for_external_message(params_.wait_externals_until).wrap();
+      wait_externals_total_time_ += wait_timer.elapsed();
+      if (S.is_error()) {
+        LOG(INFO) << "No new external messages appeared before timeout";
+        break;
+      }
     }
   }
   co_return {};
@@ -4219,6 +4268,9 @@ td::actor::Task<> Collator::process_external_and_new_messages() {
  * @returns True if the processing was successful, false otherwise.
  */
 td::actor::Task<bool> Collator::process_inbound_external_messages() {
+  // Existing per-message total timers exclude queue waits, so their delta is this phase's active work.
+  td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, &stats_.work_time.total};
+  td::ScopedRealCpuTimer::Guard timer{work_timer_, &stats_.work_time.import_externals};
   SCOPE_EXIT {
     stats_.load_fraction_externals = block_limit_status_->load_fraction(block::ParamLimits::cl_soft);
   };
@@ -4251,6 +4303,8 @@ td::actor::Task<bool> Collator::process_inbound_external_messages() {
       item = std::move(*pending_ext_msg_);
       pending_ext_msg_.reset();
     } else {
+      td::ScopedRealCpuTimer::Guard timer_total{work_timer_total_, nullptr};
+      td::ScopedRealCpuTimer::Guard timer{work_timer_, nullptr};
       td::Result<std::pair<td::Ref<ExtMessage>, int>> maybe;
       td::Timer wait_timer;
       if (params_.wait_externals_until) {
@@ -4265,7 +4319,6 @@ td::actor::Task<bool> Collator::process_inbound_external_messages() {
       }
       item = maybe.move_as_ok();
     }
-    td::ScopedRealCpuTimer timer_total{stats_.work_time.total};
     auto [ext_msg_ref, priority] = std::move(item);
     ++stats_.ext_msgs_total;
     if (register_external_message(ext_msg_ref, priority).is_error()) {
@@ -4274,6 +4327,7 @@ td::actor::Task<bool> Collator::process_inbound_external_messages() {
       continue;
     }
     if (out_msg_queue_size_ > SKIP_EXTERNALS_QUEUE_SIZE && priority < HIGH_PRIORITY_EXTERNAL) {
+      ++stats_.ext_msgs_skipped_backpressure;
       continue;
     }
     auto ext_msg = ext_msg_ref->root_cell();
@@ -5138,10 +5192,7 @@ bool Collator::create_mc_state_extra() {
   if (!tlb::csr_unpack(state_extra.r1.validator_info, val_info)) {
     return fatal_error("cannot unpack ValidatorInfo from previous state");
   }
-  auto cur_vset_cell = cfg_dict_new.lookup_ref(td::BitArray<32>{35});
-  if (cur_vset_cell.is_null()) {
-    cur_vset_cell = cfg_dict_new.lookup_ref(td::BitArray<32>{34});
-  }
+  auto cur_vset_cell = cfg_dict_new.lookup_ref(td::BitArray<32>{34});
   auto res = block::Config::unpack_validator_set(std::move(cur_vset_cell));
   if (res.is_error()) {
     auto err = res.move_as_error();
@@ -5451,6 +5502,14 @@ bool Collator::check_block_overload() {
                 << out_msg_queue_size_ << " > " << SPLIT_MAX_QUEUE_SIZE << ")";
     } else {
       overload_history_ |= 1;
+      // Record which cause set the overload bit, mirroring the message priority above.
+      if (block_limit_class_ >= block::ParamLimits::cl_soft) {
+        stats_.overload_reason = 1;  // load: a block-limit axis hit soft
+      } else if (long_collation_overload) {
+        stats_.overload_reason = 3;  // collation took too long
+      } else {
+        stats_.overload_reason = 4;  // long dispatch queue processing
+      }
       LOG(INFO) << message;
     }
   } else if (block_limit_class_ <= block::ParamLimits::cl_underload) {
@@ -5470,6 +5529,7 @@ bool Collator::check_block_overload() {
   if (!(overload_history_ & 1) && out_msg_queue_size_ >= FORCE_SPLIT_QUEUE_SIZE &&
       out_msg_queue_size_ <= SPLIT_MAX_QUEUE_SIZE) {
     overload_history_ |= 1;
+    stats_.overload_reason = 2;  // out_msg_queue reached the force-split limit
     LOG(INFO) << "setting overload history because out_msg_queue reached force split limit (" << out_msg_queue_size_
               << " >= " << FORCE_SPLIT_QUEUE_SIZE << ")";
   }
@@ -5483,6 +5543,9 @@ bool Collator::check_block_overload() {
     LOG(INFO) << "want_merge set because of underload history " << buffer;
     want_merge_ = true;
   }
+  // Record the final want_split decision and the peak block-limit class for session-stats attribution.
+  stats_.want_split = want_split_;
+  stats_.peak_block_limit_class = block_limit_class_;
   return true;
 }
 
@@ -6597,7 +6660,11 @@ void Collator::finalize_stats() {
   }
   stats_.cc_seqno = params_.validator_set.not_null() ? params_.validator_set->get_catchain_seqno() : 0;
   stats_.collated_at = td::Clocks::system();
+  if (block_candidate) {
+    block_candidate->collated_at_monotonic = td::Timestamp::now().at();
+  }
   stats_.attempt = params_.attempt_idx;
+  stats_.first_in_window = params_.first_in_window;
   stats_.is_validator = params_.collator_node_id.is_zero();
   stats_.self = stats_.is_validator ? PublicKey(pubkeys::Ed25519(params_.creator)).compute_short_id()
                                     : params_.collator_node_id.pubkey_hash();

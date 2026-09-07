@@ -254,7 +254,7 @@ td::Status Config::unpack() {
   }
   config_dict = std::make_unique<vm::Dictionary>(config_root, 32);
   if (mode & needValidatorSet) {
-    auto vset_res = unpack_validator_set(get_config_param(35, 34), true);
+    auto vset_res = unpack_validator_set(get_config_param(34), true);
     if (vset_res.is_error()) {
       return vset_res.move_as_error();
     }
@@ -2093,6 +2093,21 @@ td::Result<SizeLimitsConfig> Config::do_get_size_limits_config(td::Ref<vm::CellS
     return td::Status::Error("configuration parameter 43 is invalid");
   }
   return limits;
+}
+
+td::Result<ValidatorRegistryConfig> Config::get_validator_registry_config() const {
+  Ref<vm::Cell> param = get_config_param(46);
+  if (param.is_null()) {
+    return td::Status::Error("configuration parameter 46 is absent");
+  }
+  gen::ValRegistryConfig::Record rec;
+  if (!gen::unpack_cell(param, rec)) {
+    return td::Status::Error("configuration parameter 46 is invalid");
+  }
+  return ValidatorRegistryConfig{
+      .contract_address = rec.contract_address,
+      .max_collators_per_validator = rec.max_collators_per_validator,
+  };
 }
 
 std::unique_ptr<vm::Dictionary> Config::get_suspended_addresses(ton::UnixTime now) const {
